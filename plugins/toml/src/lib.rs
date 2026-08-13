@@ -4,14 +4,17 @@
 //! It exists to prove three things at once — that the contract is implementable
 //! from the SDK alone, that the host's capability grant is enough to do real
 //! work, and that a plugin needs nothing from the database's own crates.
+//!
+//! It implements [`Simple`], which is the fourth thing it proves: a format
+//! with no cross-file structure writes **one function**, and the SDK derives
+//! both phases of the contract — `parse` runs it per chunk, `assemble`
+//! concatenates in chunk order.
 
-use dr_strange_ext::{
-    Guest, Input, Manifest, Output, OutputExt, export_plugin, host, node, output,
-};
+use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin};
 
 struct Toml;
 
-impl Guest for Toml {
+impl Simple for Toml {
     fn describe() -> Manifest {
         Manifest {
             name: "toml".into(),
@@ -20,7 +23,7 @@ impl Guest for Toml {
         }
     }
 
-    fn preprocess(subject: Input, _options: Vec<(String, String)>) -> Result<Output, String> {
+    fn process(subject: Input, _options: &[(String, String)]) -> Result<Output, String> {
         let mut out = output();
         let files = match subject {
             Input::Files(paths) => paths,
@@ -55,4 +58,4 @@ impl Guest for Toml {
     }
 }
 
-export_plugin!(Toml);
+simple_plugin!(Toml);
