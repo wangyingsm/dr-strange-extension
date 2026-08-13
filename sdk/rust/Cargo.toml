@@ -1,0 +1,29 @@
+[package]
+name = "dr-strange-ext"
+description = "Write a preprocessor plugin for dr-strange: the WIT contract, guest bindings and helpers (ROADMAP §11)"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/wangyingsm/dr-strange-extensions"
+keywords = ["wasm", "component-model", "plugin", "graph"]
+categories = ["wasm", "development-tools"]
+
+# The contract must travel with the crate — a published SDK whose `.wit` was
+# missing would be useless to anyone regenerating bindings. `wit/` here is a
+# copy of the repository's canonical `../../wit/`, refreshed by `just vendor-wit`
+# and checked by CI; crates.io cannot package a path outside the crate.
+include = ["src/**/*", "wit/**/*", "README.md"]
+
+[dependencies]
+# The *only* two dependencies, and deliberately so — this crate is what a plugin
+# author puts in their Cargo.toml. In particular not `dr-strange-core`, since a
+# guest has no business compiling a storage engine in order to name a property,
+# and not `wasmtime`, which is the host's side of the boundary.
+wit-bindgen = "0.60"
+serde_json = "1"
+
+# Its own workspace: it is built for `wasm32-wasip2` alongside the plugins here,
+# not as part of the database's build graph.
+[workspace]
+members = []

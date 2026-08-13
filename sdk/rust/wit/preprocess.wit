@@ -1,0 +1,138 @@
+// The preprocessor plugin contract (ROADMAP §11).
+//
+// **This is the canonical copy.** It lives beside the SDK because that is the
+// crate a plugin author depends on, and so the place they will look for the
+// contract. The `dr-strange` repository keeps a vendored copy to generate its
+// host bindings — it cannot build against a repository it does not contain —
+// and its CI checks the two still match. Changes are made here.
+//
+// A plugin turns a format-specific input into **facts** — nodes and edges it is
+// certain about — and **prose**, the residue that still needs a model. An input
+// that yields only facts is digested with no model call at all.
+
+package drsg:preprocess@1.0.0;
+
+/// What the host will answer. This *is* the capability grant: a plugin can
+/// reach exactly what is written here and nothing else — no filesystem, no
+/// network, no environment, and no way to write anything anywhere.
+///
+/// Input arrives by **pull, not push**: a repository copied into linear memory
+/// would be both a needless copy and a 4 GiB ceiling, and pulling is what lets
+/// a code plugin follow an import across files.
+interface host {
+    /// Readable paths whose name ends with `suffix` ("" for all), relative to
+    /// the root, **sorted**.
+    ///
+    /// Sorted is part of the contract rather than a convenience: unsorted
+    /// directory order would vary fact and prose order between runs, and
+    /// re-ingesting a repository is meant to yield the same graph.
+    // `%list` escapes the keyword: the function keeps the name the Rust `Host`
+    // trait already uses on the host side, rather than the two drifting apart
+    // over a lexical accident.
+    %list: func(suffix: string) -> result<list<string>, string>;
+
+    /// One file's bytes. A path outside the root the host was given is
+    /// refused — the check is on the resolved path, so `..` and symlinks do
+    /// not walk through it.
+    read: func(path: string) -> result<list<u8>, string>;
+
+    /// What to call the thing being read, when its contents do not say.
+    /// A Rust crate normally names itself in its manifest, but pointed at a
+    /// bare `src/` directory there is no manifest to read.
+    label: func() -> option<string>;
+}
+
+/// What a plugin must provide.
+interface preprocessor {
+    /// What the plugin is and what it claims.
+    record manifest {
+        /// Lowercase, stable: it is half of `_generated_by` and the name an
+        /// operator passes to `--handler`.
+        name: string,
+        /// The other half of `_generated_by`. They are never useful apart.
+        version: string,
+        /// Extensions this handles, lowercase and without the dot.
+        extensions: list<string>,
+    }
+
+    /// A single document — an upload, a fetched body, one file.
+    record doc {
+        name: string,
+        bytes: list<u8>,
+    }
+
+    /// One unit of work. `files` carries the subset of a tree the router
+    /// assigned to this plugin; the plugin may still pull more through the
+    /// host, which is where a cross-file call graph comes from.
+    variant input {
+        document(doc),
+        files(list<string>),
+    }
+
+    /// A fact about a thing.
+    ///
+    /// `properties` is a **JSON object**. WIT has no recursive types and a
+    /// property value may itself be a list or a map of values, so the shape
+    /// travels as JSON — which is also exactly what `digest.write` accepts, so
+    /// this reuses a path that already exists rather than inventing a
+    /// flattening for the occasion.
+    record node {
+        key: string,
+        /// The kind of thing this is, in the plugin's own vocabulary.
+        label: string,
+        /// Further labels asserted rather than chosen — `external` on a node
+        /// standing in for something outside the tree that was read. They take
+        /// no part in the model's label reconciliation.
+        extra-labels: list<string>,
+        properties: string,
+    }
+
+    /// A fact about a relation. `src` and `dst` are node keys.
+    record edge {
+        src: string,
+        dst: string,
+        %type: string,
+        properties: string,
+    }
+
+    /// What ran, and what it could not do.
+    ///
+    /// Counted and named rather than dropped silently: a thin graph should be
+    /// explained by its report, not investigated by re-running the ingest with
+    /// different arguments.
+    record report {
+        facts: u32,
+        prose-chars: u32,
+        /// Inputs this plugin could not read, or that held nothing.
+        skipped: u32,
+        /// Anything a reader would want said in words — what could not be
+        /// resolved, and why.
+        notes: list<string>,
+    }
+
+    /// Facts, prose, and an account of both.
+    record output {
+        nodes: list<node>,
+        edges: list<edge>,
+        /// Empty means no model call is needed at all.
+        prose: string,
+        report: report,
+    }
+
+    /// Called once when the plugin is installed and again before it is used,
+    /// so a registry entry that has drifted from the artifact is caught rather
+    /// than trusted.
+    describe: func() -> manifest;
+
+    /// `options` are this plugin's own settings, from `[plugins.<name>]` in the
+    /// operator's config — the host passes them through without interpreting
+    /// them, because what a plugin can be configured to do is the plugin's
+    /// business and not the database's.
+    preprocess: func(subject: input, options: list<tuple<string, string>>)
+        -> result<output, string>;
+}
+
+world plugin {
+    import host;
+    export preprocessor;
+}
