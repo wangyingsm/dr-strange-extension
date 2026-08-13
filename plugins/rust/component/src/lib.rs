@@ -52,7 +52,7 @@ impl Guest for RustPlugin {
             Input::Document(doc) => parse_document(&doc.name, &doc.bytes, include),
         };
         // The partial is ours to shape; the host shuttles it and never looks.
-        serde_json::to_vec(&facts).map_err(|e| format!("serializing a partial: {e}"))
+        rmp_serde::to_vec(&facts).map_err(|e| format!("serializing a partial: {e}"))
     }
 
     fn assemble(partials: Vec<Vec<u8>>, _options: Vec<(String, String)>) -> Result<Output, String> {
@@ -60,7 +60,7 @@ impl Guest for RustPlugin {
         // what keeps the result independent of where the boundaries fell.
         let mut all: Vec<FileFacts> = Vec::new();
         for bytes in &partials {
-            let chunk: Vec<FileFacts> = serde_json::from_slice(bytes)
+            let chunk: Vec<FileFacts> = rmp_serde::from_slice(bytes)
                 .map_err(|e| format!("a partial did not decode: {e}"))?;
             all.extend(chunk);
         }
