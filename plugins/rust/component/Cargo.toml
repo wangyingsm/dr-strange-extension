@@ -1,0 +1,20 @@
+[package]
+name = "drsg-plugin-rust"
+description = "The drsg rust preprocessor plugin: the parser, wrapped for the wasm contract"
+version = "2.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK, the parser, and the serializer the partial format uses — nothing
+# else of drsg's. This is the same position a third-party author is in, and the
+# claim is checked (`cargo tree` must show no dr-strange-core, no wasmtime).
+[dependencies]
+dr-strange-ext = { path = "../../../sdk/rust" }
+drsg-rust-parser = { path = "../parser" }
+serde_json = "1"
+
+[workspace]
+members = []
