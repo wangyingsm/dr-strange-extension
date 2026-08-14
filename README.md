@@ -18,6 +18,7 @@ plugins/go/            the Go parser, same split
 plugins/ts/            TypeScript *and* JavaScript — one swc parser, both
 plugins/py/            Python, on ruff's parser
 plugins/java/          Java, on tree-sitter's grammar
+plugins/c/             C, on tree-sitter's grammar — flat-namespace keys
 plugins/toml/          the smallest plugin that is still a plugin
 ```
 

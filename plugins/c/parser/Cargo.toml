@@ -1,0 +1,17 @@
+[package]
+name = "drsg-c-parser"
+description = "C into facts — the parsing half of the drsg c plugin"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# tree-sitter-c: the C grammar behind GitHub's own highlighting, maintained
+# by the tree-sitter org. Same C-in-wasm toolchain the Java plugin proved.
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-c = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+members = []

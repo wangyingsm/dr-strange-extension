@@ -37,8 +37,16 @@ ts-plugin:
 py-plugin:
     cd plugins/py/component && cargo build --release --target wasm32-wasip2
 
-# The Java grammar is C (tree-sitter); wasi-sdk's clang compiles it for the
-# sandbox — set WASI_SDK to your install (https://github.com/WebAssembly/wasi-sdk).
+# The Java and C grammars are C (tree-sitter); wasi-sdk's clang compiles them
+# for the sandbox — set WASI_SDK to your install
+# (https://github.com/WebAssembly/wasi-sdk).
+c-plugin:
+    cd plugins/c/component && \
+      CC_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/clang \
+      AR_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/llvm-ar \
+      CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/share/wasi-sysroot" \
+      cargo build --release --target wasm32-wasip2
+
 java-plugin:
     cd plugins/java/component &&       CC_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/clang       AR_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/llvm-ar       CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/share/wasi-sysroot"       cargo build --release --target wasm32-wasip2
 
@@ -53,3 +61,4 @@ test:
     cd plugins/ts/parser && cargo test
     cd plugins/py/parser && cargo test
     cd plugins/java/parser && cargo test
+    cd plugins/c/parser && cargo test
