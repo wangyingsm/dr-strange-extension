@@ -362,7 +362,7 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 	switch t := s.Type.(type) {
 	case *ast.StructType:
 		props := w.props("", doc, name)
-		if fields := w.fieldMap(t.Fields); len(fields) > 0 {
+		if fields := w.fieldList(t.Fields); len(fields) > 0 {
 			props["fields"] = map[string]any{
 				"$desc":  "the fields it declares, each with its type as written",
 				"$value": fields,
@@ -526,21 +526,25 @@ func (w *walker) addSource(props Props, n ast.Node) {
 	}
 }
 
-func (w *walker) fieldMap(fields *ast.FieldList) map[string]any {
+// fieldList renders fields the way the Rust parser does — a list of
+// `name: type` strings, in declaration order, which a map would have lost.
+// Go has no visibility keyword to prepend: the capitalization *is* the
+// visibility, and it is already in the name.
+func (w *walker) fieldList(fields *ast.FieldList) []string {
 	if fields == nil {
 		return nil
 	}
-	out := map[string]any{}
+	var out []string
 	for _, f := range fields.List {
 		ty := w.print(f.Type)
 		if len(f.Names) == 0 {
 			// An embedded field: its name is its type's.
-			out[embeddedName(f.Type)] = ty
+			out = append(out, embeddedName(f.Type)+": "+ty)
 			continue
 		}
 		for _, id := range f.Names {
 			if id.Name != "_" {
-				out[id.Name] = ty
+				out = append(out, id.Name+": "+ty)
 			}
 		}
 	}

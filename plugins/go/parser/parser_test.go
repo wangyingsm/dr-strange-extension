@@ -253,9 +253,19 @@ func TestStructFieldsAreDescribed(t *testing.T) {
 	if !ok {
 		t.Fatalf("fields prop missing: %+v", n.Props)
 	}
-	value := described["$value"].(map[string]any)
-	if value["X"] != "float64" || value["name"] != "string" {
-		t.Fatalf("fields = %+v", value)
+	// A list of `name: type` in declaration order — the Rust parser's shape.
+	value, ok := described["$value"].([]string)
+	if !ok {
+		t.Fatalf("fields must be a list: %+v", described)
+	}
+	want := []string{"X: float64", "Y: float64", "name: string"}
+	if len(value) != len(want) {
+		t.Fatalf("fields = %v", value)
+	}
+	for i := range want {
+		if value[i] != want[i] {
+			t.Fatalf("field %d = %q, want %q", i, value[i], want[i])
+		}
 	}
 }
 

@@ -1312,3 +1312,40 @@ fn lines_and_files_are_recorded() {
     assert!(module.props.contains_key("path"));
     assert!(!module.props.contains_key("line"));
 }
+
+/// A digest rooted at a crate's `src/` still records paths an editor at the
+/// crate root can open: `compute/cache.rs` is written `src/compute/cache.rs`,
+/// the same convention module resolution already assumed.
+#[test]
+fn file_paths_are_crate_root_relative() {
+    let t = Tree::new("srcroot");
+    t.write("src/lib.rs", "pub mod compute;\n")
+        .write("src/compute/mod.rs", "pub fn go() {}\n");
+
+    // Rooted at src/ — the host hands `compute/mod.rs`.
+    let out = run_files(&TestFiles::rooted(t.0.join("src")));
+    let f = out
+        .nodes
+        .iter()
+        .find(|n| n.key.ends_with("::compute::go"))
+        .expect("the function");
+    assert_eq!(f.props["file"], Value::String("src/compute/mod.rs".into()));
+    let module = out
+        .nodes
+        .iter()
+        .find(|n| n.props.contains_key("path") && n.key.ends_with("::compute"))
+        .expect("the module");
+    assert_eq!(
+        module.props["path"],
+        Value::String("src/compute/mod.rs".into())
+    );
+
+    // Rooted at the crate — the paths already carry `src/`, and stay as written.
+    let whole = run(&t);
+    let f = whole
+        .nodes
+        .iter()
+        .find(|n| n.key.ends_with("::compute::go"))
+        .expect("the function");
+    assert_eq!(f.props["file"], Value::String("src/compute/mod.rs".into()));
+}

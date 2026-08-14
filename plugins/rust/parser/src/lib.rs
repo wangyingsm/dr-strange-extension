@@ -222,7 +222,7 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
         label: "Module".into(),
         extra_labels: Vec::new(),
         props: props([
-            ("path", path.to_string()),
+            ("path", source_path(path)),
             ("doc_comment", docs_of(&ast.attrs)),
             ("imports", join_imports(&imports)),
         ]),
@@ -241,7 +241,7 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
     for n in &mut f.nodes {
         if !n.props.contains_key("path") {
             n.props
-                .insert("file".into(), Value::String(path.to_string()));
+                .insert("file".into(), Value::String(source_path(path)));
         }
     }
     f
@@ -1377,6 +1377,22 @@ fn target_root(path: &str) -> Option<(String, &'static str, &str)> {
 /// The directory holding a file's target root, or `None` when it has none.
 fn crate_dir(path: &str) -> Option<String> {
     target_root(path).map(|(dir, _, _)| dir)
+}
+
+/// The path as an editor at the crate root would open it.
+///
+/// A digest rooted at a crate's `src/` hands paths like `compute/cache.rs`;
+/// module resolution already treats those as crate source (that is what the
+/// fallback crate name means), and cargo's convention puts crate source under
+/// `src/` — so the recorded path says so too. A path that carries its own
+/// target root (`crates/foo/src/…` from a workspace digest) is already
+/// rooted, and stays as written.
+fn source_path(path: &str) -> String {
+    if target_root(path).is_some() {
+        path.to_string()
+    } else {
+        format!("src/{path}")
+    }
 }
 
 /// `name = "..."` from a manifest's `[package]` section.
