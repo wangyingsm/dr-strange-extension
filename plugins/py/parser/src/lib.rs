@@ -454,7 +454,7 @@ impl Walker<'_> {
                 if !base.is_empty() {
                     base.push('.');
                 }
-                base.push_str(&m.id.to_string());
+                base.push_str(m.id.as_ref());
             }
             base
         };

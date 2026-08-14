@@ -342,14 +342,11 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 module = format!("{module}.{part}");
             }
             if ix.modules.contains(&module) {
-                return match ix.decl(&module, name) {
-                    Some(key) => Some(Some(key)),
-                    None => None,
-                };
+                return ix.decl(&module, name).map(Some);
             }
             // Not parsed here: external if its root is, an attribute of a
             // value otherwise.
-            let root_module = module.split('.').next().unwrap_or(&module).to_string();
+            let root_module = module.split('.').next().unwrap_or(&module).to_owned();
             if !ix.modules.contains(&root_module) && ix.decl(&f.module_id, root).is_none() {
                 let key = format!("{module}.{name}");
                 note_external(&seen, external, &key, "Function");
