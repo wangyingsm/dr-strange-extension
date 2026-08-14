@@ -15,12 +15,15 @@ sdk/rust/              dr-strange-ext, published to crates.io
 sdk/go/                the Go SDK: generated bindings and the ext package
 plugins/rust/          the Rust parser (parser/ native + component/ wrapper)
 plugins/go/            the Go parser, same split
+plugins/ts/            TypeScript *and* JavaScript — one swc parser, both
 plugins/toml/          the smallest plugin that is still a plugin
 ```
 
-Rust and Go are the first two of five language ecosystems planned here —
-Java, TypeScript and Python follow, each with an SDK under `sdk/` publishing
-to its own registry, and a plugin under `plugins/`.
+Rust, Go and TS/JS are the first three of five language ecosystems planned
+here — Java and Python follow. Each ecosystem gets an SDK under `sdk/`
+publishing to its own registry; the `ts` plugin itself is written in Rust on
+`swc` (the parser behind Next.js) — the sdk/ts + componentize-js proof is
+its own later slice, so SDK risk never touches a flagship parser.
 
 Every SDK generates from `wit/preprocess.wit`. Copies exist where packaging
 demands one (a crate cannot publish a file outside itself); `just check-wit`
@@ -61,6 +64,13 @@ Go (TinyGo ≥ 0.41 and wit-bindgen-go):
 ```
 just go-plugin
 drsg plugin install plugins/go/component/go.wasm
+```
+
+TypeScript/JavaScript (stable Rust, like the Rust plugin):
+
+```
+just ts-plugin
+drsg plugin install plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm
 ```
 
 The Go build pins `-scheduler=none -gc=leaking` — the reasons are written on

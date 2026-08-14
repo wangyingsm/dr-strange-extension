@@ -31,6 +31,9 @@ go-plugin:
 rust-plugin:
     cd plugins/rust/component && cargo build --release --target wasm32-wasip2
 
+ts-plugin:
+    cd plugins/ts/component && cargo build --release --target wasm32-wasip2
+
 toml-plugin:
     cd plugins/toml && cargo build --release --target wasm32-wasip2
 
@@ -39,3 +42,4 @@ toml-plugin:
 test:
     cd plugins/rust/parser && cargo test
     cd plugins/go/parser && go test ./...
+    cd plugins/ts/parser && cargo test

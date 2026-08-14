@@ -1,0 +1,23 @@
+[package]
+name = "drsg-ts-parser"
+description = "TypeScript and JavaScript into facts — the parsing half of the drsg ts plugin"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# swc rather than a hand parser: the parser behind Next.js, pure Rust, and
+# one `Syntax` switch covers TS, TSX, JS and JSX alike. Parse-only — no
+# transforms, no type checker, which is the point: facts a parser is certain
+# of, nothing a checker would have to infer.
+[dependencies]
+swc_common = "25"
+swc_ecma_parser = "44"
+swc_ecma_ast = "28"
+swc_ecma_visit = "28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Not part of the drsg workspace: built for wasm32-wasip2 by the component
+# beside it, tested natively here.
+[workspace]
+members = []
