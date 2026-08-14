@@ -570,14 +570,14 @@ impl Walker<'_> {
                         };
                         match &**prop {
                             ast::Prop::Shorthand(i) => {
-                                self.cjs_export(&i.sym.to_string(), &i.sym.to_string());
+                                self.cjs_export(&i.sym, &i.sym);
                             }
                             ast::Prop::KeyValue(kv) => {
                                 let Some(name) = prop_name(&kv.key) else {
                                     continue;
                                 };
                                 if let ast::Expr::Ident(v) = &*kv.value {
-                                    self.cjs_export(&name, &v.sym.to_string());
+                                    self.cjs_export(&name, &v.sym);
                                 }
                             }
                             _ => {}
@@ -605,7 +605,7 @@ impl Walker<'_> {
         };
         if is_exports_member && let Some(name) = target.prop.as_ident().map(|p| p.sym.to_string()) {
             match &*a.right {
-                ast::Expr::Ident(v) => self.cjs_export(&name, &v.sym.to_string()),
+                ast::Expr::Ident(v) => self.cjs_export(&name, &v.sym),
                 ast::Expr::Arrow(arrow) => {
                     let key = format!("{}.{name}", self.module);
                     let sig = self.fn_signature(&name, arrow.span, Some(arrow.body.span()));
@@ -1331,8 +1331,8 @@ impl CallCollector<'_, '_> {
 
 impl Visit for CallCollector<'_, '_> {
     fn visit_call_expr(&mut self, node: &ast::CallExpr) {
-        match &node.callee {
-            ast::Callee::Expr(expr) => match &**expr {
+        if let ast::Callee::Expr(expr) = &node.callee {
+            match &**expr {
                 ast::Expr::Ident(i) => {
                     // A lazy `require('./x')` inside a body is still an
                     // import; anything else named `require` is noise either
@@ -1367,8 +1367,7 @@ impl Visit for CallCollector<'_, '_> {
                     }
                 }
                 _ => self.walker.facts.opaque += 1,
-            },
-            _ => {}
+            }
         }
         node.visit_children_with(self);
     }

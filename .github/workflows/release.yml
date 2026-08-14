@@ -29,6 +29,7 @@ env:
   CARGO_TERM_COLOR: always
   WASI_SDK_VERSION: "33.0"
   TINYGO_VERSION: "0.41.1"
+  WASM_TOOLS_VERSION: "1.254.0"
 
 jobs:
   plugin:
@@ -64,6 +65,12 @@ jobs:
             "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo${TINYGO_VERSION}.linux-amd64.tar.gz"
           tar -xzf /tmp/tinygo.tar.gz -C "$HOME"
           echo "$HOME/tinygo/bin" >> "$GITHUB_PATH"
+          # TinyGo's wasip2 target shells out to wasm-tools to lift the
+          # module into a component.
+          curl -sSfL -o /tmp/wasm-tools.tar.gz \
+            "https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux.tar.gz"
+          tar -xzf /tmp/wasm-tools.tar.gz -C "$HOME"
+          echo "$HOME/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
       - name: Install wasi-sdk
         if: contains(fromJSON('["c", "java", "web"]'), steps.meta.outputs.plugin)
         run: |
