@@ -7,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/wangyingsm/dr-strange-extensions/plugins/go/parser"
-	ext "github.com/wangyingsm/dr-strange-extensions/sdk/go"
+	"github.com/wangyingsm/dr-strange-extension/plugins/go/parser"
+	ext "github.com/wangyingsm/dr-strange-extension/sdk/go"
 )
 
 type goPlugin struct{}

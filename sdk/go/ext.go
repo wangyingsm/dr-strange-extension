@@ -21,7 +21,7 @@ import (
 
 	"go.bytecodealliance.org/cm"
 
-	pp "github.com/wangyingsm/dr-strange-extensions/sdk/go/bindings/drsg/preprocess/preprocessor"
+	pp "github.com/wangyingsm/dr-strange-extension/sdk/go/bindings/drsg/preprocess/preprocessor"
 )
 
 // Manifest names the plugin and claims its file extensions.

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/wangyingsm/dr-strange-extensions/sdk/go/bindings/drsg/preprocess/host"
+	"github.com/wangyingsm/dr-strange-extension/sdk/go/bindings/drsg/preprocess/host"
 )
 
 // Results are copied out of the canonical-ABI buffers before they are

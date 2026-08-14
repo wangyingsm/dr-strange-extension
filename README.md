@@ -1,107 +1,236 @@
-# dr-strange-extensions
+<p align="center">
+  <img src="assets/logo.svg" alt="dr-strange-extension" width="240">
+</p>
 
-The **official extension repository** for
-[dr-strange](https://github.com/wangyingsm/dr-strange): the preprocessor plugins
-we maintain, and the SDKs for writing your own (ROADMAP §11).
+<h1 align="center">dr-strange-extension</h1>
 
-A plugin turns a format-specific input into **facts** — nodes and edges it is
-certain about — and **prose**, the residue that still needs a model. An input
-that yields only facts is digested with **no model call at all**: an AST does
-not infer that `parse()` calls `lex()`, it knows.
+<p align="center">
+  The <b>official extension repository</b> for the
+  <a href="https://github.com/wangyingsm/dr-strange">Dr-STRANGE</a> graph database:
+  sandboxed WebAssembly preprocessor plugins that turn source code into graph
+  facts before any model reads it, and the SDKs for writing your own.
+</p>
 
-```
-wit/preprocess.wit     the contract — language-neutral, and canonical
-sdk/rust/              dr-strange-ext, published to crates.io
-sdk/go/                the Go SDK: generated bindings and the ext package
-plugins/rust/          the Rust parser (parser/ native + component/ wrapper)
-plugins/go/            the Go parser, same split
-plugins/ts/            TypeScript *and* JavaScript — one swc parser, both
-plugins/py/            Python, on ruff's parser
-plugins/java/          Java, on tree-sitter's grammar
-plugins/c/             C, on tree-sitter's grammar — flat-namespace keys
-plugins/toml/          the smallest plugin that is still a plugin
-```
+<p align="center">
+  <a href="https://github.com/wangyingsm/dr-strange-extension/actions/workflows/ci.yml"><img
+    src="https://github.com/wangyingsm/dr-strange-extension/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/wangyingsm/dr-strange-extension/releases"><img
+    src="https://img.shields.io/github/v/release/wangyingsm/dr-strange-extension?sort=date&label=latest%20release&color=d9a441" alt="Releases"></a>
+  <a href="#license-and-contribution"><img
+    src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
+</p>
 
-All five planned language ecosystems now ship official parsers — Rust, Go,
-TS/JS, Python, and Java. Each ecosystem gets an SDK under `sdk/` publishing
-to its own registry; the `ts`, `py` and `java` plugins themselves are
-written in Rust (`swc`, ruff's parser, and tree-sitter respectively) — the
-per-ecosystem SDK proofs are their own later slices, so SDK risk never
-touches a flagship parser. The Java grammar is C: wasi-sdk's clang compiles
-it for the sandbox, and the same toolchain opens the door to C and zig
-plugins later.
+<p align="center">English · <a href="README_CN.md">简体中文</a></p>
 
-Every SDK generates from `wit/preprocess.wit`. Copies exist where packaging
-demands one (a crate cannot publish a file outside itself); `just check-wit`
-fails if any has drifted, and `just vendor-wit` refreshes them.
+---
 
-## Why its own repository
+## Dr-STRANGE, in one paragraph
 
-Official does not mean lock-step. A plugin ships a fix without waiting for a
-database release, and the database releases without waiting for five language
-toolchains. The contract is the only thing that has to move in step, which is
-why it is small and versioned.
+[Dr-STRANGE](https://github.com/wangyingsm/dr-strange) is an AI-native embedded
+graph database: planes of nodes and edges with a soft schema, vector + keyword
++ graph-proximity hybrid retrieval, time travel, a change feed, natural-language
+querying — and `drsg digest`, which ingests documents and repositories into a
+knowledge graph. When `digest` meets **source code**, it does not ask a model to
+guess at structure: it routes each file to a **preprocessor plugin** that parses
+it into facts a compiler-grade parser is certain of. A repository that yields
+only facts is ingested with **no model call at all** — an AST does not infer
+that `parse()` calls `lex()`, it knows.
 
-## What a plugin can reach
+Those plugins live here, apart from the database on purpose: official does not
+mean lock-step. A parser ships a fix without waiting for a database release,
+and the database releases without waiting for eight toolchains.
 
-Exactly `host.list`, `host.read` and `host.label` — no network, no
-environment, and no way to write anywhere. Reads are rooted at the directory
-the host was pointed at, checked on the resolved path.
+## Supported extensions
 
-A component may *import* `wasi:filesystem` — the TinyGo, Python and JS
-runtimes plant that import before a plugin's first line runs — but the grant
-behind it is an empty preopen table: there is no directory handle to read,
-probe, or enumerate. `wasi:sockets` is refused at install by name, because no
-runtime needs sockets to start; that import is intent. Clocks are frozen and
-`wasi:random` deals a fixed byte sequence, so a runtime that seeds map order
-from entropy (Go does) still emits the same facts on every run.
+Every plugin is a sandboxed `wasm32-wasip2` component, installed from its
+release URL. drsg pins the artifact's sha256 at install and re-checks it at
+every load.
 
-## Releases
+| Plugin | Claims | Parser underneath | Install |
+|---|---|---|---|
+| `rust` | `.rs` | [syn](https://crates.io/crates/syn) | [rust-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm) |
+| `go` | `.go` | Go's own `go/parser`, via TinyGo | [go-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/go-v1.0.0/go.wasm) |
+| `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) — ESM **and** CommonJS | [ts-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/ts-v1.0.0/ts.wasm) |
+| `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff)'s parser | [py-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/py-v1.0.0/py.wasm) |
+| `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [java-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/java-v1.0.0/java.wasm) |
+| `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [c-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/c-v1.0.0/c.wasm) |
+| `web` | `.html .htm .css` | tree-sitter html/css/js — one plugin, so `class="btn"` binds to the stylesheet that defines `.btn` | [web-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/web-v1.0.0/web.wasm) |
+| `toml` | `.toml` | [toml](https://crates.io/crates/toml) — the smallest plugin that is still a plugin | [toml-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/toml-v1.0.0/toml.wasm) |
 
-Each plugin releases at its own pace — the reason this repository exists
-apart from the database. Cut one by tagging `<plugin>-v<semver>`:
-
-```
-git tag rust-v2.0.0 && git push origin rust-v2.0.0
+```console
+$ drsg plugin install https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm
+installed rust@2  sha256:f0170fcf1406
+  handles: .rs
 ```
 
-CI builds the component and attaches `<plugin>.wasm` (plus its sha256) to
-the GitHub release; consumers install straight from it:
+Every parser follows one discipline: keys are the language's *own* qualified
+names (`crate::module::fn`, `pkg.Type.Method`, `file.c::func`,
+`index.html#map`), every definition carries its `file` and `line`, every edge
+the line it is written on — and whatever a parser cannot know for certain
+(a method receiver's type, which of two definitions links, a class two
+stylesheets define) is **counted in the report, never guessed**.
 
-```
-drsg plugin install https://github.com/wangyingsm/dr-strange-extensions/releases/download/rust-v2.0.0/rust.wasm
-```
+## The contract
 
-drsg pins the artifact's hash at install and re-checks it at every load, so
-a release is immutable in the only sense that matters.
+The plugin ↔ host contract is one small [WIT](wit/preprocess.wit) world,
+`drsg:preprocess`, canonical in this repository and vendored by drsg:
 
-## Building a plugin
+```wit
+interface host {
+  %list: func(suffix: string) -> result<list<string>, string>;
+  read:  func(path: string) -> result<list<u8>, string>;
+  label: func() -> option<string>;
+}
 
-Rust (stable, `wasm32-wasip2` target):
-
-```
-just rust-plugin
-drsg plugin install plugins/rust/component/target/wasm32-wasip2/release/drsg_plugin_rust.wasm
-```
-
-Go (TinyGo ≥ 0.41 and wit-bindgen-go):
-
-```
-just go-plugin
-drsg plugin install plugins/go/component/go.wasm
-```
-
-TypeScript/JavaScript, Python and Java (stable Rust; Java needs wasi-sdk
-for its C grammar — see the justfile):
-
-```
-just ts-plugin && just py-plugin && just java-plugin
-drsg plugin install plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm
-drsg plugin install plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm
-drsg plugin install plugins/java/component/target/wasm32-wasip2/release/drsg_plugin_java.wasm
+interface preprocessor {
+  describe: func() -> manifest;                          // name, version, extensions
+  parse:    func(subject: input, options: list<tuple<string, string>>)
+              -> result<list<u8>, string>;               // one chunk → an opaque partial
+  assemble: func(partials: list<list<u8>>, options: list<tuple<string, string>>)
+              -> result<output, string>;                 // all partials, in order → facts
+}
 ```
 
-The Go build pins `-scheduler=none -gc=leaking` — the reasons are written on
-the recipe in the `justfile`, and they are load-bearing. The host runs every
-call in a fresh store, which is what makes a leaking collector acceptable:
-what leaks dies with the call.
+**Two phases, deliberately.** The host splits the routed files into chunks and
+runs `parse` over them in parallel — fresh store per call, sharing nothing —
+then calls `assemble` once with every partial in chunk order. Cross-file
+resolution (imports, headers, barrel re-exports, interface satisfaction) lives
+in `assemble`, inside the plugin, because it is language semantics and the
+database holds none. The partial is opaque bytes: serialize whatever your own
+`assemble` wants to read back.
+
+**Input is pull, not push.** The three `host` functions above are the *entire*
+capability grant. A plugin pulls the files around the one it was handed — how a
+code parser follows an import — and reads are rooted at the digested directory,
+checked on the resolved path. Beyond that the sandbox grants nothing: no
+network (`wasi:sockets` is refused at load, by name), an empty filesystem
+preopen table, frozen clocks, fixed entropy, instruction and memory budgets —
+so re-ingesting a tree yields byte-identical facts, every time. Whatever a
+plugin produces comes back as a **return value**; only the host writes to the
+database.
+
+## Writing a plugin
+
+### Rust
+
+Depend on the SDK — `wit-bindgen` + `serde_json` and nothing else of ours —
+and implement either the two-phase contract or, for anything without
+cross-file work, the one-function facade:
+
+```toml
+[dependencies]
+# crates.io publication pending; until then, the git dependency:
+dr-strange-ext = { git = "https://github.com/wangyingsm/dr-strange-extension" }
+
+[lib]
+crate-type = ["cdylib"]
+```
+
+```rust
+use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin};
+
+struct MyPlugin;
+
+impl Simple for MyPlugin {
+    fn describe() -> Manifest {
+        Manifest { name: "mine".into(), version: "1".into(), extensions: vec!["xyz".into()] }
+    }
+
+    /// One subject at a time; the SDK derives parse/assemble from this.
+    fn process(subject: Input, _options: &[(String, String)]) -> Result<Output, String> {
+        let mut out = output();
+        if let Input::Files(paths) = subject {
+            for path in paths {
+                let bytes = host::read(&path)?;
+                out.nodes
+                    .push(node(&path, "Thing").prop("bytes", bytes.len() as i64).build());
+            }
+        }
+        Ok(out.finish())
+    }
+}
+
+simple_plugin!(MyPlugin);
+```
+
+Build and install:
+
+```console
+$ cargo build --release --target wasm32-wasip2
+$ drsg plugin install target/wasm32-wasip2/release/my_plugin.wasm
+```
+
+For real parsers, implement the generated `Guest` trait directly (see
+[`plugins/rust`](plugins/rust) — `parse` returns a serialized partial per
+chunk, `assemble` resolves across all of them) and pull neighbouring files
+through `dr_strange_ext::bindings::drsg::preprocess::host`.
+
+### Go
+
+Depend on the SDK module, implement the `ext.Plugin` interface, and build
+with TinyGo (≥ 0.41, with `wasm-tools` on PATH):
+
+```console
+$ go get github.com/wangyingsm/dr-strange-extension/sdk/go
+```
+
+```go
+package main
+
+import ext "github.com/wangyingsm/dr-strange-extension/sdk/go"
+
+type mine struct{}
+
+func (mine) Describe() ext.Manifest {
+    return ext.Manifest{Name: "mine", Version: "1", Extensions: []string{"xyz"}}
+}
+
+func (mine) Parse(subject ext.Subject, options map[string]string) ([]byte, error) {
+    // Pull files via ext.List / ext.Read; serialize your partial.
+    return []byte{}, nil
+}
+
+func (mine) Assemble(partials [][]byte, options map[string]string) (ext.Output, error) {
+    return ext.Output{Nodes: []ext.Node{{Key: "k", Label: "Thing"}}}, nil
+}
+
+func init() { ext.Register(mine{}) }
+func main() {}
+```
+
+```console
+$ tinygo build -target=wasip2 -scheduler=none -gc=leaking \
+    --wit-package ./wit --wit-world drsg:preprocess-build/plugin-go -o mine.wasm .
+```
+
+The flags are load-bearing (the [`justfile`](justfile) explains why); copy
+[`plugins/go/component/wit`](plugins/go/component/wit) for the build world.
+One rule runs through the Go SDK: everything lifted from the ABI is copied
+before use — a `cm` slice is a view the collector can move out from under you.
+
+Whatever the language: run `just check-wit` before building (the vendored
+contract copies must match the canonical one), and test your parser natively —
+every official plugin keeps its parser a plain library under a thin component
+wrapper, so the tests need no wasm toolchain at all.
+
+## License and contribution
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option — the same terms as the database.
+
+Contributions are welcome:
+
+- **A new language or format** starts as an issue naming the parser you would
+  build on (the pattern: a mature, ideally canonical parser — syn, swc, ruff,
+  tree-sitter — wrapped as `plugins/<name>/{parser,component}`).
+- **Parser fixes** should come with a native test that fails before and passes
+  after; CI runs every parser's suite, an uncached `clippy -D warnings`, and
+  builds all eight components to `wasm32-wasip2` on every push.
+- **Contract changes** are the one thing that moves in lock-step with the
+  database — open the discussion on the
+  [dr-strange](https://github.com/wangyingsm/dr-strange) side first.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or
+conditions.

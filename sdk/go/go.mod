@@ -1,4 +1,4 @@
-module github.com/wangyingsm/dr-strange-extensions/sdk/go
+module github.com/wangyingsm/dr-strange-extension/sdk/go
 
 go 1.26
 

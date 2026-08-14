@@ -1,3 +1,3 @@
-module github.com/wangyingsm/dr-strange-extensions/plugins/go/parser
+module github.com/wangyingsm/dr-strange-extension/plugins/go/parser
 
 go 1.26
