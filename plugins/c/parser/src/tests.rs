@@ -311,10 +311,12 @@ fn lines_and_files_are_recorded() {
     assert_eq!(text(&f.props["file"]), "a.c");
     assert_eq!(edge(&a, "CALLS", "helper").props["line"], Value::from(4u64));
     assert_eq!(edge(&a, "IMPORTS", "b.h").props["line"], Value::from(1u64));
-    // The file node holds the path, no line of its own.
+    // The file node: no line, no `path` (the key is the path), and its
+    // includes resolved to the keys of the files they name — link-shaped.
     let file = node(&a, "a.c");
-    assert_eq!(text(&file.props["path"]), "a.c");
     assert!(!file.props.contains_key("line"));
+    assert!(!file.props.contains_key("path"));
+    assert_eq!(text(&file.props["includes"]), "b.h");
 }
 
 /// A file that will not parse is counted, and takes nothing else down.

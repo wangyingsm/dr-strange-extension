@@ -177,30 +177,18 @@ fn parse_file(path: &str, text: &str, include_source: bool) -> FileFacts {
         return failed(path);
     }
 
-    // The file node, like the family's Module: `path` says which file, no
-    // line of its own.
-    let mut props = Props::new();
-    props.insert("path".into(), Value::String(path.to_string()));
-    if !facts.includes.is_empty() {
-        let joined = facts
-            .includes
-            .iter()
-            .map(
-                |(p, sys, _)| {
-                    if *sys { format!("<{p}>") } else { p.clone() }
-                },
-            )
-            .collect::<Vec<_>>()
-            .join(", ");
-        props.insert("includes".into(), Value::String(joined));
-    }
+    // The file node, like the family's Module — but no `path` prop: the key
+    // *is* the path, and a property repeating the key states the same fact
+    // twice. `includes` is written at assemble, where resolution can turn
+    // each entry into the key of the file it names — which is what lets a
+    // reader (and the dashboard) follow it as a link.
     facts.nodes.insert(
         0,
         Node {
             key: file_key(path),
             label: "File".into(),
             extra_labels: Vec::new(),
-            props,
+            props: Props::new(),
         },
     );
     for n in facts.nodes.iter_mut().skip(1) {

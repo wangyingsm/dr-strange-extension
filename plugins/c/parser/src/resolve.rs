@@ -285,6 +285,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             _ => None,
         }
     };
+    let mut includes_prop: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for f in &all {
         let src_key = crate::file_key(&f.file);
         for (target, system, line) in &f.includes {
@@ -298,16 +299,40 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     &mut edge_set,
                     edge_at(&src_key, &name, "IMPORTS", *line),
                 );
+                includes_prop.entry(src_key.clone()).or_default().push(name);
                 continue;
             }
             match resolve_include(&f.file, target) {
-                Some(k) => add_edge(
-                    &mut pending,
-                    &mut edge_set,
-                    edge_at(&src_key, &k, "IMPORTS", *line),
-                ),
-                None => missed_includes += 1,
+                Some(k) => {
+                    add_edge(
+                        &mut pending,
+                        &mut edge_set,
+                        edge_at(&src_key, &k, "IMPORTS", *line),
+                    );
+                    includes_prop.entry(src_key.clone()).or_default().push(k);
+                }
+                None => {
+                    missed_includes += 1;
+                    // Unresolvable stays as written — readable, just not a
+                    // link.
+                    includes_prop
+                        .entry(src_key.clone())
+                        .or_default()
+                        .push(target.clone());
+                }
             }
+        }
+    }
+    // The File node's `includes`, in include order, each entry the key of
+    // the file it names — the shape the dashboard resolves into links.
+    for n in out.nodes.iter_mut() {
+        if n.label == "File"
+            && let Some(list) = includes_prop.get(&n.key)
+        {
+            n.props.insert(
+                "includes".into(),
+                serde_json::Value::String(list.join(", ")),
+            );
         }
     }
 
