@@ -243,7 +243,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         };
     // CONTAINS from the chosen side; everything else as written.
-    for (_, e) in &contains {
+    for e in contains.values() {
         add_edge(&mut pending, &mut edge_set, (*e).clone());
     }
     for f in &all {

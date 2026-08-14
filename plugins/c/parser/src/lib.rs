@@ -133,13 +133,13 @@ fn stem_of(path: &str) -> String {
         .to_string()
 }
 
-/// The file node key: the path without its extension, which keeps two
-/// `utils.c` in different directories apart while reading naturally.
+/// The file node key: the path as written, extension included — `util.c`
+/// and `util.h` are two files, and C's own convention says so: an include
+/// names the header with its extension. Collapsing the pair made the
+/// header vanish from the census and turned `util.c → util.h` into a
+/// self-edge.
 fn file_key(path: &str) -> String {
-    path.rsplit_once('.')
-        .map(|(s, _)| s)
-        .unwrap_or(path)
-        .to_string()
+    path.to_string()
 }
 
 fn parse_file(path: &str, text: &str, include_source: bool) -> FileFacts {
@@ -272,10 +272,10 @@ impl Walker<'_> {
         };
         let name = self.text(name_node);
         // Include guards are bookkeeping, not interface.
-        if name.ends_with("_H") || name.ends_with("_H_") || name.starts_with("_") {
-            if node.child_by_field_name("value").is_none() {
-                return;
-            }
+        if (name.ends_with("_H") || name.ends_with("_H_") || name.starts_with('_'))
+            && node.child_by_field_name("value").is_none()
+        {
+            return;
         }
         let key = name.clone(); // macros share the flat global namespace
         let line = self.line(name_node);
@@ -429,13 +429,13 @@ impl Walker<'_> {
 
     fn typedef(&mut self, node: TsNode) {
         // The underlying type may be a struct/union/enum defined right here.
-        if let Some(t) = node.child_by_field_name("type") {
-            if matches!(
+        if let Some(t) = node.child_by_field_name("type")
+            && matches!(
                 t.kind(),
                 "struct_specifier" | "union_specifier" | "enum_specifier"
-            ) {
-                self.record_type(t);
-            }
+            )
+        {
+            self.record_type(t);
         }
         let ty = node
             .child_by_field_name("type")
@@ -555,6 +555,7 @@ impl Walker<'_> {
         self.push_decl(name.clone(), label, props, line, true, false, name);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn push_decl(
         &mut self,
         key: String,
@@ -614,8 +615,10 @@ impl Walker<'_> {
     fn collect_calls(&mut self, caller: &str, body: TsNode) {
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
-            if node.kind() == "call_expression" {
-                if let Some(f) = node.child_by_field_name("function") {
+            if node.kind() == "call_expression"
+                && let Some(f) = node.child_by_field_name("function")
+            {
+                {
                     if f.kind() == "identifier" {
                         self.facts.calls.push(Call {
                             caller: caller.to_string(),

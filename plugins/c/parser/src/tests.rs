@@ -86,8 +86,8 @@ fn linkage_decides_the_key() {
     node(&a, "util.helper");
     assert_eq!(text(&node(&a, "util.helper").props["visibility"]), "static");
     // The file contains both.
-    assert!(has_edge(&a, "src/util", "CONTAINS", "shared"));
-    assert!(has_edge(&a, "src/util", "CONTAINS", "util.helper"));
+    assert!(has_edge(&a, "src/util.c", "CONTAINS", "shared"));
+    assert!(has_edge(&a, "src/util.c", "CONTAINS", "util.helper"));
 }
 
 /// A header declares what a source defines: one key, and the definition
@@ -108,7 +108,10 @@ fn the_definition_beats_the_declaration() {
     assert_eq!(text(&f.props["file"]), "util.c");
     assert_eq!(f.props["line"], Value::from(3u64));
     note_containing(&a, "definition wins");
-    assert!(has_edge(&a, "util", "IMPORTS", "util"));
+    // Two files, one interface: the source imports its own header, and
+    // both are File nodes — a header is a file, not an alias of its .c.
+    assert!(has_edge(&a, "util.c", "IMPORTS", "util.h"));
+    assert_eq!(node(&a, "util.h").label, "File");
 }
 
 /// Structs carry fields, enums carry variants, typedefs carry what they
@@ -234,7 +237,7 @@ fn libc_is_external_and_pointers_are_counted() {
     assert!(has_edge(&a, "log_it", "CALLS", "printf"));
     note_containing(&a, "function pointer");
     // The system include is an external File.
-    assert!(has_edge(&a, "m", "IMPORTS", "stdio.h"));
+    assert!(has_edge(&a, "m.c", "IMPORTS", "stdio.h"));
 }
 
 /// Quoted includes resolve against the parsed tree — same directory first,
@@ -251,11 +254,16 @@ fn includes_resolve_in_tree() {
     ]);
     assert!(has_edge(
         &a,
-        "src/core/engine",
+        "src/core/engine.c",
         "IMPORTS",
-        "src/core/engine"
+        "src/core/engine.h"
     ));
-    assert!(has_edge(&a, "src/core/engine", "IMPORTS", "src/util/str"));
+    assert!(has_edge(
+        &a,
+        "src/core/engine.c",
+        "IMPORTS",
+        "src/util/str.h"
+    ));
 }
 
 /// `#ifdef` arms hold ordinary declarations — walked, not skipped.
@@ -302,9 +310,9 @@ fn lines_and_files_are_recorded() {
     assert_eq!(f.props["line"], Value::from(3u64));
     assert_eq!(text(&f.props["file"]), "a.c");
     assert_eq!(edge(&a, "CALLS", "helper").props["line"], Value::from(4u64));
-    assert_eq!(edge(&a, "IMPORTS", "b").props["line"], Value::from(1u64));
+    assert_eq!(edge(&a, "IMPORTS", "b.h").props["line"], Value::from(1u64));
     // The file node holds the path, no line of its own.
-    let file = node(&a, "a");
+    let file = node(&a, "a.c");
     assert_eq!(text(&file.props["path"]), "a.c");
     assert!(!file.props.contains_key("line"));
 }
