@@ -17,15 +17,18 @@ plugins/rust/          the Rust parser (parser/ native + component/ wrapper)
 plugins/go/            the Go parser, same split
 plugins/ts/            TypeScript *and* JavaScript — one swc parser, both
 plugins/py/            Python, on ruff's parser
+plugins/java/          Java, on tree-sitter's grammar
 plugins/toml/          the smallest plugin that is still a plugin
 ```
 
-Rust, Go, TS/JS and Python cover four of the five language ecosystems
-planned here — Java remains. Each ecosystem gets an SDK under `sdk/`
-publishing to its own registry; the `ts` and `py` plugins themselves are
-written in Rust (on `swc` and on ruff's parser respectively) — the sdk/ts
-and sdk/py ecosystem proofs are their own later slices, so SDK risk never
-touches a flagship parser.
+All five planned language ecosystems now ship official parsers — Rust, Go,
+TS/JS, Python, and Java. Each ecosystem gets an SDK under `sdk/` publishing
+to its own registry; the `ts`, `py` and `java` plugins themselves are
+written in Rust (`swc`, ruff's parser, and tree-sitter respectively) — the
+per-ecosystem SDK proofs are their own later slices, so SDK risk never
+touches a flagship parser. The Java grammar is C: wasi-sdk's clang compiles
+it for the sandbox, and the same toolchain opens the door to C and zig
+plugins later.
 
 Every SDK generates from `wit/preprocess.wit`. Copies exist where packaging
 demands one (a crate cannot publish a file outside itself); `just check-wit`
@@ -68,12 +71,14 @@ just go-plugin
 drsg plugin install plugins/go/component/go.wasm
 ```
 
-TypeScript/JavaScript and Python (stable Rust, like the Rust plugin):
+TypeScript/JavaScript, Python and Java (stable Rust; Java needs wasi-sdk
+for its C grammar — see the justfile):
 
 ```
-just ts-plugin && just py-plugin
+just ts-plugin && just py-plugin && just java-plugin
 drsg plugin install plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm
 drsg plugin install plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm
+drsg plugin install plugins/java/component/target/wasm32-wasip2/release/drsg_plugin_java.wasm
 ```
 
 The Go build pins `-scheduler=none -gc=leaking` — the reasons are written on
