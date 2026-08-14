@@ -89,6 +89,7 @@ pub mod bindings {
     });
 }
 
+pub use bindings::drsg::preprocess::host;
 /// Export your [`Guest`] implementation as the component's entry point.
 ///
 /// ```ignore
@@ -98,7 +99,6 @@ pub mod bindings {
 /// A [`Simple`] plugin uses [`simple_plugin!`] instead, which derives the
 /// two-phase `Guest` and calls this for you.
 pub use bindings::export_plugin;
-pub use bindings::drsg::preprocess::host;
 pub use bindings::exports::drsg::preprocess::preprocessor::{
     Doc, Edge, Guest, Input, Manifest, Node, Output, Report,
 };
@@ -215,8 +215,8 @@ pub mod partial {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Output, String> {
-        let v: Value = serde_json::from_slice(bytes)
-            .map_err(|e| format!("a partial did not decode: {e}"))?;
+        let v: Value =
+            serde_json::from_slice(bytes).map_err(|e| format!("a partial did not decode: {e}"))?;
         let str_of = |v: &Value, k: &str| -> Result<String, String> {
             v[k].as_str()
                 .map(str::to_string)
@@ -424,7 +424,10 @@ mod tests {
         let mut p = Props::new();
         p.describe("_generated_by", "what produced this, not a model", "toml@1");
         let v: Value = serde_json::from_str(&p.finish()).unwrap();
-        assert_eq!(v["_generated_by"]["$desc"], "what produced this, not a model");
+        assert_eq!(
+            v["_generated_by"]["$desc"],
+            "what produced this, not a model"
+        );
         assert_eq!(v["_generated_by"]["$value"], "toml@1");
     }
 
@@ -461,8 +464,12 @@ mod tests {
     #[test]
     fn a_partial_round_trips() {
         let mut out = output();
-        out.nodes
-            .push(node("k::a", "Thing").also("External").prop("n", 1i64).build());
+        out.nodes.push(
+            node("k::a", "Thing")
+                .also("External")
+                .prop("n", 1i64)
+                .build(),
+        );
         out.edges.push(edge("k::a", "USES", "k::b").build());
         out.prose = "residue".into();
         out.report.skipped = 2;
@@ -491,8 +498,7 @@ mod tests {
         b.prose = "two".into();
         b.report.skipped = 1;
 
-        let merged =
-            partial::merge(vec![partial::encode(&a), partial::encode(&b)]).unwrap();
+        let merged = partial::merge(vec![partial::encode(&a), partial::encode(&b)]).unwrap();
         assert_eq!(merged.nodes[0].key, "first");
         assert_eq!(merged.nodes[1].key, "second");
         assert_eq!(merged.prose, "one\n\ntwo");

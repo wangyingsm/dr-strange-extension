@@ -56,6 +56,25 @@ runtime needs sockets to start; that import is intent. Clocks are frozen and
 `wasi:random` deals a fixed byte sequence, so a runtime that seeds map order
 from entropy (Go does) still emits the same facts on every run.
 
+## Releases
+
+Each plugin releases at its own pace — the reason this repository exists
+apart from the database. Cut one by tagging `<plugin>-v<semver>`:
+
+```
+git tag rust-v2.0.0 && git push origin rust-v2.0.0
+```
+
+CI builds the component and attaches `<plugin>.wasm` (plus its sha256) to
+the GitHub release; consumers install straight from it:
+
+```
+drsg plugin install https://github.com/wangyingsm/dr-strange-extensions/releases/download/rust-v2.0.0/rust.wasm
+```
+
+drsg pins the artifact's hash at install and re-checks it at every load, so
+a release is immutable in the only sense that matters.
+
 ## Building a plugin
 
 Rust (stable, `wasm32-wasip2` target):

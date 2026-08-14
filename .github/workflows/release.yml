@@ -1,0 +1,98 @@
+name: Release
+
+# Each plugin releases at its own pace — that is the reason this repository
+# exists apart from the database. Cut one by tagging `<plugin>-v<semver>`:
+#
+#   git tag rust-v2.0.0 && git push origin rust-v2.0.0
+#
+# The release carries `<plugin>.wasm` and its sha256; the installer is
+#
+#   drsg plugin install https://github.com/<owner>/<repo>/releases/download/<tag>/<plugin>.wasm
+#
+# and drsg pins the hash at install, re-checking it at every load.
+on:
+  push:
+    tags:
+      - "rust-v*"
+      - "go-v*"
+      - "ts-v*"
+      - "py-v*"
+      - "java-v*"
+      - "c-v*"
+      - "web-v*"
+      - "toml-v*"
+
+permissions:
+  contents: write # create the GitHub Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+  WASI_SDK_VERSION: "33.0"
+  TINYGO_VERSION: "0.41.1"
+
+jobs:
+  plugin:
+    name: Build and release ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Which plugin
+        id: meta
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          plugin="${tag%%-v*}"
+          case "$plugin" in
+            toml)  artifact="plugins/toml/target/wasm32-wasip2/release/drsg_plugin_toml.wasm" ;;
+            go)    artifact="plugins/go/component/go.wasm" ;;
+            rust|ts|py|c|java|web)
+                   artifact="plugins/$plugin/component/target/wasm32-wasip2/release/drsg_plugin_$plugin.wasm" ;;
+            *)     echo "unknown plugin in tag: $tag"; exit 1 ;;
+          esac
+          echo "plugin=$plugin" >> "$GITHUB_OUTPUT"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: actions/setup-go@v5
+        if: steps.meta.outputs.plugin == 'go'
+        with:
+          go-version-file: plugins/go/parser/go.mod
+      - name: Install TinyGo
+        if: steps.meta.outputs.plugin == 'go'
+        run: |
+          curl -sSfL -o /tmp/tinygo.tar.gz \
+            "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo${TINYGO_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/tinygo.tar.gz -C "$HOME"
+          echo "$HOME/tinygo/bin" >> "$GITHUB_PATH"
+      - name: Install wasi-sdk
+        if: contains(fromJSON('["c", "java", "web"]'), steps.meta.outputs.plugin)
+        run: |
+          curl -sSfL -o /tmp/wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME"
+          echo "WASI_SDK=$HOME/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux" >> "$GITHUB_ENV"
+      - uses: extractions/setup-just@v3
+      - name: Build
+        run: just "${{ steps.meta.outputs.plugin }}-plugin"
+      - name: Stage artifact + checksum
+        run: |
+          mkdir -p dist
+          cp "${{ steps.meta.outputs.artifact }}" "dist/${{ steps.meta.outputs.plugin }}.wasm"
+          (cd dist && sha256sum "${{ steps.meta.outputs.plugin }}.wasm" > "${{ steps.meta.outputs.plugin }}.wasm.sha256")
+          cat "dist/${{ steps.meta.outputs.plugin }}.wasm.sha256"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          plugin="${{ steps.meta.outputs.plugin }}"
+          sha=$(cut -d' ' -f1 "dist/$plugin.wasm.sha256")
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/$plugin.wasm" "dist/$plugin.wasm.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "Install:
+
+          \`\`\`
+          drsg plugin install https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$plugin.wasm
+          \`\`\`
+
+          sha256: \`$sha\` — drsg pins this at install and re-checks it at every load."

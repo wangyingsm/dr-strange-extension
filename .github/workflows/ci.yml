@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A newer push to the same ref supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  WASI_SDK_VERSION: "33.0"
+  TINYGO_VERSION: "0.41.1"
+
+jobs:
+  contract:
+    name: Contract — vendored copies match the canonical WIT
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # `just check-wit`, inlined: CI needs no task runner to diff files, and
+      # a drifted copy should fail loudly with the diff in the log.
+      - name: check-wit
+        run: |
+          diff -u wit/preprocess.wit sdk/rust/wit/preprocess.wit
+          diff -u wit/preprocess.wit sdk/go/wit/preprocess.wit
+          diff -u wit/preprocess.wit plugins/go/component/wit/deps/preprocess/preprocess.wit
+
+  rust:
+    name: Rust — fmt, clippy, test (SDK + every parser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sdk/rust
+            plugins/rust/parser
+            plugins/ts/parser
+            plugins/py/parser
+            plugins/java/parser
+            plugins/c/parser
+            plugins/web/parser
+      # Standalone crates, deliberately (each ships at its own pace), so the
+      # gate loops rather than relying on a workspace.
+      - name: Gates
+        run: |
+          for dir in sdk/rust \
+                     plugins/rust/parser plugins/ts/parser plugins/py/parser \
+                     plugins/java/parser plugins/c/parser plugins/web/parser; do
+            echo "::group::$dir"
+            (cd "$dir" && cargo fmt --check && cargo clippy --all-targets && cargo test)
+            echo "::endgroup::"
+          done
+
+  go:
+    name: Go — fmt, vet, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/go/parser/go.mod
+      - name: Format
+        run: |
+          bad=$(gofmt -l sdk/go plugins/go/parser plugins/go/component)
+          if [ -n "$bad" ]; then echo "gofmt needed:"; echo "$bad"; exit 1; fi
+      - name: Vet + test
+        run: |
+          (cd sdk/go && go vet ./...)
+          (cd plugins/go/parser && go vet ./... && go test ./...)
+          (cd plugins/go/component && go vet ./...)
+
+  components:
+    name: Components — every plugin builds to wasm32-wasip2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            plugins/rust/component
+            plugins/ts/component
+            plugins/py/component
+            plugins/java/component
+            plugins/c/component
+            plugins/web/component
+            plugins/toml
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: plugins/go/parser/go.mod
+      - name: Install wasi-sdk (C grammars) and TinyGo (Go plugin)
+        run: |
+          curl -sSfL -o /tmp/wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
+          tar -xzf /tmp/wasi-sdk.tar.gz -C "$HOME"
+          echo "WASI_SDK=$HOME/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux" >> "$GITHUB_ENV"
+          curl -sSfL -o /tmp/tinygo.tar.gz \
+            "https://github.com/tinygo-org/tinygo/releases/download/v${TINYGO_VERSION}/tinygo${TINYGO_VERSION}.linux-amd64.tar.gz"
+          tar -xzf /tmp/tinygo.tar.gz -C "$HOME"
+          echo "$HOME/tinygo/bin" >> "$GITHUB_PATH"
+      - uses: extractions/setup-just@v3
+      - name: Build every component
+        run: |
+          for plugin in toml rust ts py c java web go; do
+            echo "::group::$plugin"
+            just "${plugin}-plugin"
+            echo "::endgroup::"
+          done
+      - name: Artifacts exist
+        run: |
+          ls -la plugins/toml/target/wasm32-wasip2/release/drsg_plugin_toml.wasm \
+                 plugins/rust/component/target/wasm32-wasip2/release/drsg_plugin_rust.wasm \
+                 plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm \
+                 plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm \
+                 plugins/c/component/target/wasm32-wasip2/release/drsg_plugin_c.wasm \
+                 plugins/java/component/target/wasm32-wasip2/release/drsg_plugin_java.wasm \
+                 plugins/web/component/target/wasm32-wasip2/release/drsg_plugin_web.wasm \
+                 plugins/go/component/go.wasm
