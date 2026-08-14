@@ -47,11 +47,15 @@ type Node struct {
 	Props       Props    `json:"props,omitempty"`
 }
 
-// Edge is a fact about a relation, between node keys.
+// Edge is a fact about a relation, between node keys. Line is where the
+// relation is *written* — the call site, the import statement, the declared
+// member — and 0 where nothing is written anywhere (a structural
+// satisfaction has no line).
 type Edge struct {
 	Src  string `json:"src"`
 	Dst  string `json:"dst"`
 	Type string `json:"type"`
+	Line int    `json:"line,omitempty"`
 }
 
 // Call is a call site held until every file is known. Alias is the package
@@ -61,6 +65,7 @@ type Call struct {
 	Caller string `json:"caller"`
 	Alias  string `json:"alias,omitempty"`
 	Name   string `json:"name"`
+	Line   int    `json:"line,omitempty"`
 }
 
 // Import is one import declaration. Alias is as written ("" when the default
@@ -68,6 +73,7 @@ type Call struct {
 type Import struct {
 	Alias string `json:"alias,omitempty"`
 	Path  string `json:"path"`
+	Line  int    `json:"line,omitempty"`
 }
 
 // Method records one method's receiver-independent signature, for the
@@ -233,7 +239,10 @@ func walkFile(file, pkgPath string, f *ast.File, fset *token.FileSet, src []byte
 	facts.Nodes = append(facts.Nodes, Node{Key: pkgPath, Label: "Package", Props: pkgProps})
 
 	for _, spec := range f.Imports {
-		imp := Import{Path: strings.Trim(spec.Path.Value, `"`)}
+		imp := Import{
+			Path: strings.Trim(spec.Path.Value, `"`),
+			Line: fset.Position(spec.Pos()).Line,
+		}
 		if spec.Name != nil {
 			imp.Alias = spec.Name.Name
 		}
@@ -253,6 +262,15 @@ func walkFile(file, pkgPath string, f *ast.File, fset *token.FileSet, src []byte
 			w.funcDecl(d)
 		case *ast.GenDecl:
 			w.genDecl(d)
+		}
+	}
+
+	// Every declaration in this walk came from this file, so the file lands
+	// on each node in one place. The package is the exception: it *spans*
+	// files, and a single file+line on it would be an arbitrary pick.
+	for i := range facts.Nodes {
+		if facts.Nodes[i].Label != "Package" {
+			facts.Nodes[i].Props["file"] = file
 		}
 	}
 	return facts
@@ -302,7 +320,7 @@ func (w *walker) funcDecl(d *ast.FuncDecl) {
 	if w.includeSource {
 		w.addSource(props, d)
 	}
-	w.node(parent, key, label, props)
+	w.node(parent, key, label, props, w.line(d))
 	w.calls(key, d.Body)
 }
 
@@ -353,14 +371,14 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 		if w.includeSource {
 			w.addSource(props, s)
 		}
-		w.node(w.pkg, key, "Struct", props)
+		w.node(w.pkg, key, "Struct", props, w.line(s))
 	case *ast.InterfaceType:
 		iface := Iface{Key: key, Pkg: w.pkg}
 		props := w.props("", doc, name)
 		if w.includeSource {
 			w.addSource(props, s)
 		}
-		w.node(w.pkg, key, "Interface", props)
+		w.node(w.pkg, key, "Interface", props, w.line(s))
 		for _, m := range t.Methods.List {
 			if len(m.Names) == 0 {
 				iface.Embeds = append(iface.Embeds, w.print(m.Type))
@@ -381,12 +399,12 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 				// parser treats a trait's items. No visibility: an
 				// interface's methods are as public as the interface.
 				mkey := key + "." + id.Name
-				mprops := Props{"signature": "func " + id.Name + sig}
+				mprops := Props{"signature": "func " + id.Name + sig, "line": w.line(m)}
 				if text := strings.TrimSpace(m.Doc.Text()); text != "" {
 					mprops["doc_comment"] = text
 				}
 				w.facts.Nodes = append(w.facts.Nodes, Node{Key: mkey, Label: "Method", Props: mprops})
-				w.facts.Edges = append(w.facts.Edges, Edge{Src: key, Dst: mkey, Type: "HAS_METHOD"})
+				w.facts.Edges = append(w.facts.Edges, Edge{Src: key, Dst: mkey, Type: "HAS_METHOD", Line: w.line(m)})
 			}
 		}
 		w.facts.Ifaces = append(w.facts.Ifaces, iface)
@@ -399,7 +417,7 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 		if w.includeSource {
 			w.addSource(props, s)
 		}
-		w.node(w.pkg, key, label, props)
+		w.node(w.pkg, key, label, props, w.line(s))
 	}
 }
 
@@ -433,7 +451,7 @@ func (w *walker) valueSpec(d *ast.GenDecl, s *ast.ValueSpec, values []ast.Expr, 
 			// initializer as written is the fact for each of them.
 			props["value"] = w.print(values[0])
 		}
-		w.node(w.pkg, w.pkg+"."+id.Name, label, props)
+		w.node(w.pkg, w.pkg+"."+id.Name, label, props, w.line(id))
 	}
 }
 
@@ -453,10 +471,10 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 		}
 		switch fn := call.Fun.(type) {
 		case *ast.Ident:
-			w.facts.Calls = append(w.facts.Calls, Call{Caller: caller, Name: fn.Name})
+			w.facts.Calls = append(w.facts.Calls, Call{Caller: caller, Name: fn.Name, Line: w.line(call)})
 		case *ast.SelectorExpr:
 			if x, ok := fn.X.(*ast.Ident); ok {
-				w.facts.Calls = append(w.facts.Calls, Call{Caller: caller, Alias: x.Name, Name: fn.Sel.Name})
+				w.facts.Calls = append(w.facts.Calls, Call{Caller: caller, Alias: x.Name, Name: fn.Sel.Name, Line: w.line(call)})
 			} else {
 				w.facts.Opaque++
 			}
@@ -467,9 +485,15 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 	})
 }
 
-func (w *walker) node(parent, key, label string, props Props) {
+func (w *walker) node(parent, key, label string, props Props, line int) {
+	props["line"] = line
 	w.facts.Nodes = append(w.facts.Nodes, Node{Key: key, Label: label, Props: props})
-	w.facts.Edges = append(w.facts.Edges, Edge{Src: parent, Dst: key, Type: "CONTAINS"})
+	w.facts.Edges = append(w.facts.Edges, Edge{Src: parent, Dst: key, Type: "CONTAINS", Line: line})
+}
+
+// line is 1-based, like every editor's gutter.
+func (w *walker) line(n ast.Node) int {
+	return w.fset.Position(n.Pos()).Line
 }
 
 // props builds the common property set, dropping entries that came back

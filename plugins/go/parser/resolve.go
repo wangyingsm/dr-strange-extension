@@ -153,10 +153,10 @@ func Assemble(all []FileFacts) Assembled {
 	for _, f := range all {
 		for _, imp := range f.Imports {
 			if _, ok := pkgNames[imp.Path]; ok {
-				addEdge(Edge{Src: f.PkgPath, Dst: imp.Path, Type: "IMPORTS"})
+				addEdge(Edge{Src: f.PkgPath, Dst: imp.Path, Type: "IMPORTS", Line: imp.Line})
 			} else {
 				note(imp.Path, "Package")
-				addEdge(Edge{Src: f.PkgPath, Dst: imp.Path, Type: "IMPORTS"})
+				addEdge(Edge{Src: f.PkgPath, Dst: imp.Path, Type: "IMPORTS", Line: imp.Line})
 			}
 		}
 	}
@@ -187,7 +187,7 @@ func Assemble(all []FileFacts) Assembled {
 				}
 				d := forPkg(f.PkgPath)
 				if key, ok := d.funcs[c.Name]; ok {
-					addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS"})
+					addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS", Line: c.Line})
 				} else if !d.types[c.Name] { // a conversion is not a call
 					unresolved++
 				}
@@ -202,7 +202,7 @@ func Assemble(all []FileFacts) Assembled {
 			}
 			if d, ok := pkgs[target]; ok {
 				if key, ok := d.funcs[c.Name]; ok {
-					addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS"})
+					addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS", Line: c.Line})
 				} else if !d.types[c.Name] {
 					unresolved++
 				}
@@ -210,7 +210,7 @@ func Assemble(all []FileFacts) Assembled {
 			}
 			key := target + "." + c.Name
 			note(key, "Function")
-			addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS"})
+			addEdge(Edge{Src: c.Caller, Dst: key, Type: "CALLS", Line: c.Line})
 			externalCalls++
 		}
 	}

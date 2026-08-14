@@ -10,6 +10,9 @@ license = "MIT OR Apache-2.0"
 # the JSON the contract carries, and its host access is one small trait. That
 # is what lets its tests run natively while the component wraps it for wasm.
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+# Direct dep only to turn on span-locations, which is what makes
+# `span().start().line` a real line number instead of zero.
+proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -560,3 +560,54 @@ func TestAMissingReceiverTypeIsImplied(t *testing.T) {
 		t.Fatalf("the edge that implied it must survive: %v", a.Edges)
 	}
 }
+
+// Every definition knows its file and line, and every written relation
+// knows the line it is written on: caller --CALLS(line 4)--> callee(line 8).
+func TestLinesAndFilesAreRecorded(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n" + // 1
+			"\n" +
+			"import \"fmt\"\n" + // 3
+			"\n" +
+			"func Caller() {\n" + // 5
+			"\tfmt.Println(\"x\")\n" + // 6
+			"\thelper()\n" + // 7
+			"}\n" +
+			"\n" +
+			"func helper() {}\n", // 10
+	}})
+	c := node(t, a, "m.Caller")
+	if c.Props["line"] != 5 || c.Props["file"] != "a.go" {
+		t.Fatalf("definition site: %+v", c.Props)
+	}
+	if h := node(t, a, "m.helper"); h.Props["line"] != 10 {
+		t.Fatalf("helper line: %+v", h.Props)
+	}
+	find := func(ty, dst string) Edge {
+		for _, e := range a.Edges {
+			if e.Type == ty && e.Dst == dst {
+				return e
+			}
+		}
+		t.Fatalf("no %s edge to %s: %v", ty, dst, a.Edges)
+		return Edge{}
+	}
+	if e := find("CALLS", "m.helper"); e.Line != 7 {
+		t.Fatalf("call site line = %d", e.Line)
+	}
+	if e := find("CALLS", "fmt.Println"); e.Line != 6 {
+		t.Fatalf("external call site line = %d", e.Line)
+	}
+	if e := find("IMPORTS", "fmt"); e.Line != 3 {
+		t.Fatalf("import line = %d", e.Line)
+	}
+	if e := find("CONTAINS", "m.helper"); e.Line != 10 {
+		t.Fatalf("contains carries the declaration line: %d", e.Line)
+	}
+	// The package spans files; a single file+line on it would be a pick.
+	p := node(t, a, "m")
+	if _, has := p.Props["file"]; has {
+		t.Fatalf("package must not claim one file: %+v", p.Props)
+	}
+}

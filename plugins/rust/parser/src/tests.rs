@@ -113,28 +113,6 @@ fn text_of(v: &Value) -> Option<String> {
     }
 }
 
-/// A list property's entries, unwrapping a described wrapper.
-fn list_prop(p: &Assembled, key: &str, name: &str) -> Vec<String> {
-    let Some(v) = p
-        .nodes
-        .iter()
-        .find(|n| n.key == key)
-        .and_then(|n| n.props.get(name))
-    else {
-        return Vec::new();
-    };
-    let inner = match v {
-        Value::Object(o) => o.get("$value").unwrap_or(v),
-        other => other,
-    };
-    inner
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|x| x.as_str().map(str::to_string))
-        .collect()
-}
-
 const LIB: &str = r#"
 //! The crate.
 use std::fmt;
@@ -295,10 +273,11 @@ fn calls_resolve_by_name_and_locals_are_listed() {
             .any(|e| e.ty == "CALLS" && e.src == "k::caller" && e.dst == "k::add"),
         "caller -> add should be an edge"
     );
-    assert_eq!(prop(&out, "k::add", "local_bindings").as_deref(), Some("sum"));
+    assert_eq!(
+        prop(&out, "k::add", "local_bindings").as_deref(),
+        Some("sum")
+    );
 }
-
-
 
 /// A return type is a fact worth querying, and it is not one while it is a
 /// substring of a rendered signature.
@@ -310,8 +289,14 @@ fn a_function_records_what_it_returns() {
     let out = run(&t);
 
     assert_eq!(prop(&out, "k::T::open", "returns").as_deref(), Some("T"));
-    assert_eq!(prop(&out, "k::T::read", "returns").as_deref(), Some("usize"));
-    assert_eq!(prop(&out, "k::free_async", "returns").as_deref(), Some("i64"));
+    assert_eq!(
+        prop(&out, "k::T::read", "returns").as_deref(),
+        Some("usize")
+    );
+    assert_eq!(
+        prop(&out, "k::free_async", "returns").as_deref(),
+        Some("i64")
+    );
     assert_eq!(
         prop(&out, "k::T::fetch", "returns").as_deref(),
         Some("Result<usize,()>")
@@ -347,9 +332,18 @@ fn a_method_is_labelled_apart_from_a_function() {
 
     // The receiver's own form is kept, since `&self` and `&mut self` are a
     // real difference between two methods.
-    assert_eq!(prop(&out, "k::T::read", "receiver").as_deref(), Some("&self"));
-    assert_eq!(prop(&out, "k::T::write", "receiver").as_deref(), Some("&mut self"));
-    assert_eq!(prop(&out, "k::T::consume", "receiver").as_deref(), Some("self"));
+    assert_eq!(
+        prop(&out, "k::T::read", "receiver").as_deref(),
+        Some("&self")
+    );
+    assert_eq!(
+        prop(&out, "k::T::write", "receiver").as_deref(),
+        Some("&mut self")
+    );
+    assert_eq!(
+        prop(&out, "k::T::consume", "receiver").as_deref(),
+        Some("self")
+    );
     assert_eq!(prop(&out, "k::T::open", "receiver").as_deref(), None);
 }
 
@@ -757,7 +751,7 @@ expr_from_literal!(bool, i64, String);
     let args = invoke
         .props
         .get("arguments")
-        .and_then(|v| text_of(v))
+        .and_then(text_of)
         .unwrap_or_default();
     assert!(
         args.contains("bool") && args.contains("String"),
@@ -825,15 +819,24 @@ pub trait Reader {
         node("k::Reader::get").map(|n| n.label.as_str()),
         Some("Method")
     );
-    assert_eq!(prop(&out, "k::Reader::get", "receiver").as_deref(), Some("&self"));
-    assert_eq!(prop(&out, "k::Reader::get", "returns").as_deref(), Some("Option<u64>"));
+    assert_eq!(
+        prop(&out, "k::Reader::get", "receiver").as_deref(),
+        Some("&self")
+    );
+    assert_eq!(
+        prop(&out, "k::Reader::get", "returns").as_deref(),
+        Some("Option<u64>")
+    );
     // An associated function without a receiver is a `Function`.
     assert_eq!(
         node("k::Reader::make").map(|n| n.label.as_str()),
         Some("Function")
     );
     // A default body is where the bindings come from when there is one.
-    assert_eq!(prop(&out, "k::Reader::count", "local_bindings").as_deref(), Some("n"));
+    assert_eq!(
+        prop(&out, "k::Reader::count", "local_bindings").as_deref(),
+        Some("n")
+    );
     assert!(
         out.edges
             .iter()
@@ -1109,8 +1112,6 @@ fn an_impl_finds_a_type_declared_in_another_file() {
     every_edge_has_endpoints(&out);
 }
 
-
-
 /// A method's calls have to resolve too, and they cannot until the block its
 /// method belongs to has been resolved — which is why it happens in phases.
 #[test]
@@ -1247,4 +1248,67 @@ fn calls_resolve_to_the_nearest_definition() {
     };
     assert_eq!(call("k::a::go").as_deref(), Some("k::a::helper"));
     assert_eq!(call("k::b::go").as_deref(), Some("k::b::helper"));
+}
+
+/// Every definition knows its file and line, and every written relation
+/// knows the line it is written on: caller —CALLS(line 4)→ callee(line 7).
+#[test]
+fn lines_and_files_are_recorded() {
+    let t = Tree::new("lines");
+    t.write("Cargo.toml", "[package]\nname = \"lines\"\n");
+    t.write(
+        "src/lib.rs",
+        "use std::fs;\n\
+         \n\
+         pub fn caller() {\n\
+         \x20   helper();\n\
+         \x20   fs::read(\"x\").ok();\n\
+         }\n\
+         \n\
+         fn helper() {}\n\
+         \n\
+         pub const LIMIT: usize = 4;\n",
+    );
+    let out = run(&t);
+
+    let node = |key: &str| {
+        out.nodes
+            .iter()
+            .find(|n| n.key == format!("lines::{key}"))
+            .unwrap_or_else(|| panic!("no node lines::{key}"))
+    };
+    assert_eq!(node("caller").props["line"], Value::from(3u64));
+    assert_eq!(
+        node("caller").props["file"],
+        Value::String("src/lib.rs".into())
+    );
+    assert_eq!(node("helper").props["line"], Value::from(8u64));
+    assert_eq!(node("LIMIT").props["line"], Value::from(10u64));
+
+    let edge = |ty: &str, dst: &str| {
+        out.edges
+            .iter()
+            .find(|e| e.ty == ty && e.dst == dst)
+            .unwrap_or_else(|| panic!("no {ty} edge to {dst}"))
+    };
+    assert_eq!(
+        edge("CALLS", "lines::helper").props["line"],
+        Value::from(4u64),
+        "the call site, not the definition"
+    );
+    assert_eq!(
+        edge("CALLS", "std::fs::read").props["line"],
+        Value::from(5u64)
+    );
+    assert_eq!(edge("IMPORTS", "std::fs").props["line"], Value::from(1u64));
+    assert_eq!(
+        edge("CONTAINS", "lines::helper").props["line"],
+        Value::from(8u64)
+    );
+
+    // The file-level module spans the file: `path` says which one, and a
+    // single line would be a pick.
+    let module = out.nodes.iter().find(|n| n.key == "lines").unwrap();
+    assert!(module.props.contains_key("path"));
+    assert!(!module.props.contains_key("line"));
 }

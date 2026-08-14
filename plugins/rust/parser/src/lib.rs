@@ -139,7 +139,7 @@ pub struct FileFacts {
     impls: Vec<ImplBlock>,
     /// `(module, macro path, arguments)` for each item-position invocation —
     /// the places where items exist that this parse cannot see.
-    macro_calls: Vec<(String, String, String)>,
+    macro_calls: Vec<(String, String, String, u64)>,
     /// `(name introduced, path named)` for every `pub use` — the re-exports
     /// that make a facade path like `crate::cache` exist without anything
     /// being declared under it.
@@ -151,7 +151,7 @@ pub struct FileFacts {
     ///
     /// The nearest thing to name resolution a parser has: when a file says
     /// `use super::Database`, that *is* where its `impl Database` points.
-    imports: Vec<(String, String)>,
+    imports: Vec<(String, String, u64)>,
     /// Each key's enclosing **module**, which is what resolution narrows by.
     ///
     /// Recorded rather than recovered from the key, because a trait method's
@@ -169,12 +169,34 @@ pub struct FileFacts {
 /// callee even when it lives in another crate. A method call writes only
 /// `.read()`, and the receiver's type is exactly what a parser does not know,
 /// so those stay unresolved rather than becoming a guess.
-#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Call {
     /// The final segment — what resolution against local items matches on.
     name: String,
     /// The path as written, when the call site wrote one.
     path: Option<String>,
+    /// The call site's line. Not part of identity: the same callee named
+    /// twice in one body is one fact, and the first site is the line —
+    /// `BTreeSet::insert` keeps the first, and visiting order is source
+    /// order.
+    line: u64,
+}
+
+impl PartialEq for Call {
+    fn eq(&self, other: &Self) -> bool {
+        (&self.name, &self.path) == (&other.name, &other.path)
+    }
+}
+impl Eq for Call {}
+impl PartialOrd for Call {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Call {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.name, &self.path).cmp(&(&other.name, &other.path))
+    }
 }
 
 fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> FileFacts {
@@ -202,18 +224,26 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
         props: props([
             ("path", path.to_string()),
             ("doc_comment", docs_of(&ast.attrs)),
-            ("imports", imports.join(", ")),
+            ("imports", join_imports(&imports)),
         ]),
     });
     // Kept, not just rendered: an `impl Database` in this file is resolved
     // against what the file said it imported.
     f.imports = imports
         .iter()
-        .map(|path| (module.to_string(), path.clone()))
+        .map(|(path, line)| (module.to_string(), path.clone(), *line))
         .collect();
     f.reexports = reexports;
     f.module = module.to_string();
     walk_items(&ast.items, module, include_source, &mut f);
+    // Every node above came from this file; the file-level module already
+    // says so under `path`, everything else says it here.
+    for n in &mut f.nodes {
+        if !n.props.contains_key("path") {
+            n.props
+                .insert("file".into(), Value::String(path.to_string()));
+        }
+    }
     f
 }
 
@@ -226,7 +256,7 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
 fn collect_imports(
     items: &[syn::Item],
     module: &str,
-    out: &mut Vec<String>,
+    out: &mut Vec<(String, u64)>,
     reexports: &mut Vec<(String, String, String)>,
 ) {
     for item in items {
@@ -253,14 +283,17 @@ fn collect_imports(
                             .map(|(name, path)| (module.to_string(), name.clone(), path.clone())),
                     );
                 }
-                out.extend(named.into_iter().map(|(_, path)| path));
+                let line = line_of(&u.use_token);
+                out.extend(named.into_iter().map(|(_, path)| (path, line)));
             }
-            syn::Item::ExternCrate(e) => out.push(e.ident.to_string()),
+            syn::Item::ExternCrate(e) => out.push((e.ident.to_string(), line_of(&e.ident))),
             _ => {}
         }
     }
+    // Sorted by (path, line) then deduplicated by path: one import, its
+    // first-written line.
     out.sort();
-    out.dedup();
+    out.dedup_by(|a, b| a.0 == b.0);
     reexports.sort();
     reexports.dedup();
 }
@@ -334,7 +367,8 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                     props: p,
                 });
                 f.scopes.insert(key.clone(), parent.to_string());
-                f.edges.push(edge(parent, &key, "CONTAINS"));
+                f.edges
+                    .push(edge_at(parent, &key, "CONTAINS", line_of(&func.sig.ident)));
                 collect_calls(&key, &func.block, f);
             }
             syn::Item::Struct(s) => {
@@ -377,17 +411,44 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
             }
             syn::Item::Const(c) => {
                 let key = format!("{parent}::{}", c.ident);
-                node(f, parent, key, "Const", &c.attrs, &c.vis, ty_of(&c.ty));
+                node(
+                    f,
+                    parent,
+                    key,
+                    "Const",
+                    &c.attrs,
+                    &c.vis,
+                    ty_of(&c.ty),
+                    line_of(&c.ident),
+                );
                 set_value(f, &c.expr);
             }
             syn::Item::Static(s) => {
                 let key = format!("{parent}::{}", s.ident);
-                node(f, parent, key, "Static", &s.attrs, &s.vis, ty_of(&s.ty));
+                node(
+                    f,
+                    parent,
+                    key,
+                    "Static",
+                    &s.attrs,
+                    &s.vis,
+                    ty_of(&s.ty),
+                    line_of(&s.ident),
+                );
                 set_value(f, &s.expr);
             }
             syn::Item::Type(t) => {
                 let key = format!("{parent}::{}", t.ident);
-                node(f, parent, key, "TypeAlias", &t.attrs, &t.vis, ty_of(&t.ty));
+                node(
+                    f,
+                    parent,
+                    key,
+                    "TypeAlias",
+                    &t.attrs,
+                    &t.vis,
+                    ty_of(&t.ty),
+                    line_of(&t.ident),
+                );
             }
             syn::Item::Macro(m) => match &m.ident {
                 // `macro_rules! name` — a definition, so it is an item.
@@ -397,6 +458,7 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                     if include_source {
                         add_source(&mut p, item);
                     }
+                    p.insert("line".into(), Value::from(line_of(ident)));
                     f.nodes.push(Node {
                         key: key.clone(),
                         label: "Macro".into(),
@@ -404,7 +466,8 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                         props: p,
                     });
                     f.scopes.insert(key.clone(), parent.to_string());
-                    f.edges.push(edge(parent, &key, "CONTAINS"));
+                    f.edges
+                        .push(edge_at(parent, &key, "CONTAINS", line_of(ident)));
                 }
                 // An invocation *at item position* — `expr_from_literal!(bool,
                 // i32);` — which defines items this parse will never see.
@@ -422,6 +485,7 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                     parent.to_string(),
                     path_of(&m.mac.path),
                     tidy(&m.mac.tokens.to_string()),
+                    line_of(&m.mac.path),
                 )),
             },
             syn::Item::Trait(t) => {
@@ -435,6 +499,7 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                     &t.vis,
                     // Likewise no signature: it would be the trait's own name.
                     String::new(),
+                    line_of(&t.ident),
                 );
                 for ti in &t.items {
                     if let syn::TraitItem::Fn(m) = ti {
@@ -450,7 +515,8 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                             props,
                         });
                         f.scopes.insert(mkey.clone(), parent.to_string());
-                        f.edges.push(edge(&key, &mkey, "HAS_METHOD"));
+                        f.edges
+                            .push(edge_at(&key, &mkey, "HAS_METHOD", line_of(&m.sig.ident)));
                     }
                 }
             }
@@ -462,19 +528,27 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                     let key = format!("{parent}::{}", m.ident);
                     let mut imports = Vec::new();
                     collect_imports(inner, &key, &mut imports, &mut f.reexports);
-                    f.imports
-                        .extend(imports.iter().map(|path| (key.clone(), path.clone())));
+                    f.imports.extend(
+                        imports
+                            .iter()
+                            .map(|(path, line)| (key.clone(), path.clone(), *line)),
+                    );
                     f.nodes.push(Node {
                         key: key.clone(),
                         label: "Module".into(),
                         extra_labels: Vec::new(),
-                        props: props([
-                            ("doc_comment", docs_of(&m.attrs)),
-                            ("visibility", visibility(&m.vis)),
-                            ("imports", imports.join(", ")),
-                        ]),
+                        props: {
+                            let mut p = props([
+                                ("doc_comment", docs_of(&m.attrs)),
+                                ("visibility", visibility(&m.vis)),
+                                ("imports", join_imports(&imports)),
+                            ]);
+                            p.insert("line".into(), Value::from(line_of(&m.ident)));
+                            p
+                        },
                     });
-                    f.edges.push(edge(parent, &key, "CONTAINS"));
+                    f.edges
+                        .push(edge_at(parent, &key, "CONTAINS", line_of(&m.ident)));
                     walk_items(inner, &key, include_source, f);
                 }
             }
@@ -513,6 +587,7 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                     label: label.to_string(),
                     props,
                     calls: call_names(&m.block),
+                    line: line_of(&m.sig.ident),
                 })
             }
             _ => None,
@@ -521,6 +596,7 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
 
     f.impls.push(ImplBlock {
         module: parent.to_string(),
+        line: line_of(&im.impl_token),
         self_name,
         trait_base: im.trait_.as_ref().map(|(_, p, _)| base_path(p)),
         trait_full: im.trait_.as_ref().map(|(_, p, _)| path_of(p)),
@@ -533,6 +609,8 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
 struct ImplBlock {
     /// The module it was written in — where resolution starts looking.
     module: String,
+    /// The `impl` keyword's line — where the IMPLEMENTS relation is written.
+    line: u64,
     self_name: String,
     /// The trait path without generic arguments, which identifies the node.
     trait_base: Option<String>,
@@ -544,6 +622,8 @@ struct ImplBlock {
 #[derive(Serialize, Deserialize)]
 struct ImplMethod {
     name: String,
+    /// The definition's line, for the HAS_METHOD edge.
+    line: u64,
     /// `Method` when it takes a `self` receiver, `Function` otherwise — an
     /// associated function like `Database::open` is not a method.
     label: String,
@@ -569,6 +649,7 @@ fn call_names(block: &syn::Block) -> BTreeSet<Call> {
                 self.0.insert(Call {
                     name: last.ident.to_string(),
                     path: Some(path_of(&p.path)),
+                    line: line_of(node),
                 });
             }
             syn::visit::visit_expr_call(self, node);
@@ -577,6 +658,7 @@ fn call_names(block: &syn::Block) -> BTreeSet<Call> {
             self.0.insert(Call {
                 name: node.method.to_string(),
                 path: None,
+                line: line_of(node),
             });
             syn::visit::visit_expr_method_call(self, node);
         }
@@ -736,7 +818,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         // and produces no edge rather than an invented one.
         // Grouped by the module that wrote the `use`, not by the file: an
         // inline `mod tests` has imports of its own, and they belong to it.
-        for (module, written) in &f.imports {
+        for (module, written, line) in &f.imports {
             if written.ends_with("*") {
                 // A glob names no single target, so it produces no edge. It
                 // stays in the list as written, because the file did write it.
@@ -767,19 +849,17 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 // call site proves more, and says so.
                 note_external(&mut external, &target, None);
             }
-            let mut e = edge(module, &target, "IMPORTS");
+            let mut e = edge_at(module, &target, "IMPORTS", *line);
             if written != &target {
-                e.props.insert(
-                    "as_written".into(),
-                    Value::String(written.clone()),
-                );
+                e.props
+                    .insert("as_written".into(), Value::String(written.clone()));
             }
             impl_edges.push(e);
         }
 
         // Item-position macro invocations: an edge to the macro, so the places
         // where unseen items are defined are findable rather than invisible.
-        for (module, path, args) in &f.macro_calls {
+        for (module, path, args, line) in &f.macro_calls {
             let target = resolve_path(
                 &expand_path(path, &imports, module),
                 module,
@@ -789,7 +869,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             if !declared.contains(&target) {
                 note_external(&mut external, &target, Some("Macro"));
             }
-            let mut e = edge(module, &target, "INVOKES");
+            let mut e = edge_at(module, &target, "INVOKES", *line);
             if !args.is_empty() {
                 e.props.insert(
                     "arguments".into(),
@@ -826,13 +906,12 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     "Trait",
                     &mut external,
                 );
-                let mut e = edge(&self_key, &trait_key, "IMPLEMENTS");
+                let mut e = edge_at(&self_key, &trait_key, "IMPLEMENTS", b.line);
                 // `From<i64>` on the edge rather than as a second `From` node:
                 // which implementation is a fact about this impl, not a new
                 // word in the vocabulary.
                 if full != base {
-                    e.props
-                        .insert("impl".into(), Value::String(full.clone()));
+                    e.props.insert("impl".into(), Value::String(full.clone()));
                 }
                 impl_edges.push(e);
             }
@@ -852,7 +931,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     extra_labels: Vec::new(),
                     props: m.props.clone(),
                 });
-                impl_edges.push(edge(&self_key, &mkey, "HAS_METHOD"));
+                impl_edges.push(edge_at(&self_key, &mkey, "HAS_METHOD", m.line));
                 scopes.insert(mkey.clone(), b.module.clone());
                 fns.entry(m.name.clone()).or_default().push(mkey.clone());
                 impl_calls.extend(m.calls.iter().map(|c| {
@@ -865,6 +944,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                         Call {
                             path,
                             name: c.name.clone(),
+                            line: c.line,
                         },
                     )
                 }));
@@ -893,10 +973,8 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         if let Some(targets) = import_targets.get(&n.key)
             && n.label == "Module"
         {
-            n.props.insert(
-                "imports".into(),
-                Value::String(targets.join(", ")),
-            );
+            n.props
+                .insert("imports".into(), Value::String(targets.join(", ")));
         }
         if seen.insert(n.key.clone()) {
             out.nodes.push(n);
@@ -930,14 +1008,14 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         if let Some(p) = &call.path
             && declared.contains(p)
         {
-            out.edges.push(edge(&caller, p, "CALLS"));
+            out.edges.push(edge_at(&caller, p, "CALLS", call.line));
             continue;
         }
 
         if let Some(cands) = fns.get(&call.name) {
             match pick(&caller, cands, &scopes) {
                 Some(one) => {
-                    out.edges.push(edge(&caller, one, "CALLS"));
+                    out.edges.push(edge_at(&caller, one, "CALLS", call.line));
                     continue;
                 }
                 // Defined here under this name, but more than one candidate is
@@ -956,7 +1034,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             // that it was called — which is what "this crate uses that" needs.
             Some(p) => {
                 note_external(&mut external, p, Some("Function"));
-                out.edges.push(edge(&caller, p, "CALLS"));
+                out.edges.push(edge_at(&caller, p, "CALLS", call.line));
                 external_calls += 1;
             }
             // A method call writes only `.read()`, and the receiver's type is
@@ -1007,7 +1085,8 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     }
     if !unparsed.is_empty() {
         out.skipped += unparsed.len();
-        out.notes.push(format!("{} file(s) did not parse", unparsed.len()));
+        out.notes
+            .push(format!("{} file(s) did not parse", unparsed.len()));
         out.notes.extend(unparsed);
     }
     out
@@ -1021,9 +1100,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
 /// resolution — the module tree, `use` in scope, globs, re-exports — which is a
 /// compiler's job. But a file that says `use super::Database` has *written down*
 /// where its `Database` comes from, and that is worth reading.
-fn import_index(imports: &[(String, String)]) -> BTreeMap<String, String> {
+fn import_index(imports: &[(String, String, u64)]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for (_, path) in imports {
+    for (_, path, _) in imports {
         if let Some(last) = path.rsplit("::").next()
             && last != "*"
         {
@@ -1376,9 +1455,19 @@ fn simple(
     vis: &syn::Visibility,
 ) {
     let key = format!("{parent}::{ident}");
-    node(f, parent, key, label, attrs, vis, String::new());
+    node(
+        f,
+        parent,
+        key,
+        label,
+        attrs,
+        vis,
+        String::new(),
+        line_of(ident),
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn node(
     f: &mut FileFacts,
     parent: &str,
@@ -1387,19 +1476,22 @@ fn node(
     attrs: &[syn::Attribute],
     vis: &syn::Visibility,
     signature: String,
+    line: u64,
 ) {
+    let mut props = props([
+        ("signature", signature),
+        ("doc_comment", docs_of(attrs)),
+        ("visibility", visibility(vis)),
+    ]);
+    props.insert("line".into(), Value::from(line));
     f.nodes.push(Node {
         key: key.clone(),
         label: label.into(),
         extra_labels: Vec::new(),
-        props: props([
-            ("signature", signature),
-            ("doc_comment", docs_of(attrs)),
-            ("visibility", visibility(vis)),
-        ]),
+        props,
     });
     f.scopes.insert(key.clone(), parent.to_string());
-    f.edges.push(edge(parent, &key, "CONTAINS"));
+    f.edges.push(edge_at(parent, &key, "CONTAINS", line));
 }
 
 /// A node standing in for something this tree does not declare.
@@ -1561,9 +1653,30 @@ fn set_non_exhaustive(f: &mut FileFacts, attrs: &[syn::Attribute]) {
 fn set_value(f: &mut FileFacts, expr: &impl ToTokens) {
     let value = tidy(&expr.to_token_stream().to_string());
     if let Some(n) = f.nodes.last_mut() {
-        n.props
-            .insert("value".into(), Value::String(value));
+        n.props.insert("value".into(), Value::String(value));
     }
+}
+
+/// 1-based, like every editor's gutter. Idents rather than whole items, so
+/// a doc comment above a declaration does not move its line.
+fn line_of<T: syn::spanned::Spanned>(t: &T) -> u64 {
+    t.span().start().line as u64
+}
+
+/// An edge carrying the line the relation is written on.
+fn edge_at(src: &str, dst: &str, ty: &str, line: u64) -> Edge {
+    let mut e = edge(src, dst, ty);
+    e.props.insert("line".into(), Value::from(line));
+    e
+}
+
+/// The paths alone, for the `imports` property.
+fn join_imports(imports: &[(String, u64)]) -> String {
+    imports
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn edge(src: &str, dst: &str, ty: &str) -> Edge {
@@ -1630,6 +1743,9 @@ fn sig_of(sig: &syn::Signature) -> String {
 ///   a `Function`, which is what a Rust programmer calls it.
 /// - `is_async` — present and true only when the item is `async`, following the
 ///   same convention as `visibility`, where absent means private.
+///
+/// The definition's `line` is stamped here too — one place, so free
+/// functions, trait items and impl methods cannot drift.
 fn fn_facts(
     sig: &syn::Signature,
     attrs: &[syn::Attribute],
@@ -1664,6 +1780,7 @@ fn fn_facts(
         ("visibility", vis.map(visibility).unwrap_or_default()),
         ("local_bindings", body.map(bindings_of).unwrap_or_default()),
     ]);
+    props.insert("line".into(), Value::from(line_of(&sig.ident)));
     if sig.asyncness.is_some() {
         props.insert("is_async".into(), Value::Bool(true));
     }
