@@ -27,9 +27,9 @@
 ## Dr-STRANGE, in one paragraph
 
 [Dr-STRANGE](https://github.com/wangyingsm/dr-strange) is an AI-native embedded
-graph database: planes of nodes and edges with a soft schema, vector + keyword
-+ graph-proximity hybrid retrieval, time travel, a change feed, natural-language
-querying — and `drsg digest`, which ingests documents and repositories into a
+graph database: planes of nodes and edges with a soft schema, hybrid retrieval
+fusing vector, keyword and graph proximity, time travel, a change feed,
+natural-language querying — and `drsg digest`, which ingests documents and repositories into a
 knowledge graph. When `digest` meets **source code**, it does not ask a model to
 guess at structure: it routes each file to a **preprocessor plugin** that parses
 it into facts a compiler-grade parser is certain of. A repository that yields
