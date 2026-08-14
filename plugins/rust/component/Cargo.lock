@@ -30,7 +30,7 @@ dependencies = [
 
 [[package]]
 name = "drsg-plugin-rust"
-version = "2.0.0"
+version = "1.0.0"
 dependencies = [
  "dr-strange-ext",
  "drsg-rust-parser",
