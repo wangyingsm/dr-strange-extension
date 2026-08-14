@@ -1,0 +1,11 @@
+// The build-time world: the plugin contract plus the WASI imports TinyGo's
+// runtime needs to start. It exists so `wasm-tools component new` can resolve
+// the runtime's imports; the contract itself is the vendored copy under
+// deps/preprocess, canonical at the repository root.
+package drsg:preprocess-build;
+
+world plugin-go {
+  include wasi:cli/imports@0.2.0;
+  import drsg:preprocess/host@1.0.0;
+  export drsg:preprocess/preprocessor@1.0.0;
+}
