@@ -1,13 +1,17 @@
 //! C into facts — nodes and edges a parser is certain of, leaving nothing
 //! for a model to guess at.
 //!
-//! Same discipline as the five parsers beside it, with C's own rules for
-//! names. C has no packages: a symbol with external linkage lives in **one
-//! flat namespace**, so a non-static function's key is its bare name —
-//! that is the language's truth, not a shortcut. `static` means file-local,
-//! keyed `filestem.name` the way the linker would keep them apart. A header
-//! declares what a source defines: both write the same key, and the
-//! **definition wins** the node (it has the body and the real line).
+//! Same discipline as the five parsers beside it. Keys borrow C++'s own
+//! convention for "this file is the scope": every symbol is
+//! `{file}::{name}` — `src/wire/msgtx.c::main` — so two files defining the
+//! same name (each tool's `main`, a reference implementation per variant)
+//! are two facts, never a collision. **Binding** still follows C's linkage
+//! rules: a call reaches its own file's definition first, then the one
+//! global definition when the tree holds exactly one, and is counted when
+//! several files define the name — which definition links is build
+//! configuration a parser does not have. A header declares what a source
+//! defines: the declaration merges into the definition, which wins the
+//! node.
 //!
 //! The preprocessor is not expanded — a macro body is recorded as written,
 //! and `#include "x.h"` is the written import. tree-sitter's C grammar
@@ -265,7 +269,7 @@ impl Walker<'_> {
         {
             return;
         }
-        let key = name.clone(); // macros share the flat global namespace
+        let key = format!("{}::{name}", self.file_key);
         let line = self.line(name_node);
         let mut props = Props::new();
         let label = if node.kind() == "preproc_function_def" {
@@ -300,11 +304,7 @@ impl Walker<'_> {
             return;
         };
         let is_static = self.has_storage(node, "static");
-        let key = if is_static {
-            format!("{}.{name}", self.facts.stem)
-        } else {
-            name.clone()
-        };
+        let key = format!("{}::{name}", self.file_key);
         let line = self.line(name_node);
 
         // The signature as written: return type + declarator, minus the body.
@@ -381,11 +381,7 @@ impl Walker<'_> {
             };
             let is_function = self.is_function_declarator(declarator);
             let line = self.line(name_node);
-            let key = if is_static {
-                format!("{}.{name}", self.facts.stem)
-            } else {
-                name.clone()
-            };
+            let key = format!("{}::{name}", self.file_key);
 
             let mut props = Props::new();
             if is_function {
@@ -458,7 +454,8 @@ impl Walker<'_> {
                 props.insert("doc_comment".into(), Value::String(doc));
             }
             props.insert("line".into(), Value::from(line));
-            self.push_decl(name.clone(), "TypeAlias", props, line, true, false, name);
+            let key = format!("{}::{name}", self.file_key);
+            self.push_decl(key, "TypeAlias", props, line, true, false, name);
         }
     }
 
@@ -540,7 +537,8 @@ impl Walker<'_> {
                 );
             }
         }
-        self.push_decl(name.clone(), label, props, line, true, false, name);
+        let key = format!("{}::{name}", self.file_key);
+        self.push_decl(key, label, props, line, true, false, name);
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -82,12 +82,15 @@ fn linkage_decides_the_key() {
         "src/util.c",
         "int shared(void) { return 1; }\n\nstatic int helper(void) { return 2; }\n",
     )]);
-    node(&a, "shared");
-    node(&a, "util.helper");
-    assert_eq!(text(&node(&a, "util.helper").props["visibility"]), "static");
+    node(&a, "src/util.c::shared");
+    node(&a, "src/util.c::helper");
+    assert_eq!(
+        text(&node(&a, "src/util.c::helper").props["visibility"]),
+        "static"
+    );
     // The file contains both.
-    assert!(has_edge(&a, "src/util.c", "CONTAINS", "shared"));
-    assert!(has_edge(&a, "src/util.c", "CONTAINS", "util.helper"));
+    assert!(has_edge(&a, "src/util.c", "CONTAINS", "src/util.c::shared"));
+    assert!(has_edge(&a, "src/util.c", "CONTAINS", "src/util.c::helper"));
 }
 
 /// A header declares what a source defines: one key, and the definition
@@ -104,7 +107,7 @@ fn the_definition_beats_the_declaration() {
             "#include \"util.h\"\n\nint parse_row(const char *s) { return 0; }\n",
         ),
     ]);
-    let f = node(&a, "parse_row");
+    let f = node(&a, "util.c::parse_row");
     assert_eq!(text(&f.props["file"]), "util.c");
     assert_eq!(f.props["line"], Value::from(3u64));
     note_containing(&a, "definition wins");
@@ -129,7 +132,7 @@ typedef struct point point_t;
 typedef unsigned long size_type;
 "#,
     )]);
-    let s = node(&a, "point");
+    let s = node(&a, "types.c::point");
     assert_eq!(s.label, "Struct");
     let fields: Vec<&str> = s.props["fields"]["$value"]
         .as_array()
@@ -139,7 +142,7 @@ typedef unsigned long size_type;
         .collect();
     assert_eq!(fields, vec!["x: int", "y: int", "label: char"]);
 
-    let e = node(&a, "level");
+    let e = node(&a, "types.c::level");
     let variants: Vec<&str> = e.props["variants"]["$value"]
         .as_array()
         .unwrap()
@@ -148,9 +151,9 @@ typedef unsigned long size_type;
         .collect();
     assert_eq!(variants, vec!["DEBUG", "WARN = 10", "ERROR"]);
 
-    assert_eq!(node(&a, "point_t").label, "TypeAlias");
+    assert_eq!(node(&a, "types.c::point_t").label, "TypeAlias");
     assert_eq!(
-        text(&node(&a, "size_type").props["signature"]),
+        text(&node(&a, "types.c::size_type").props["signature"]),
         "unsigned long"
     );
 }
@@ -163,13 +166,13 @@ fn defines_are_consts_and_macros() {
         "cfg.h",
         "#ifndef CFG_H\n#define CFG_H\n\n#define MAX_RETRIES (4 * 8)\n#define MIN(a, b) ((a) < (b) ? (a) : (b))\n\n#endif\n",
     )]);
-    let c = node(&a, "MAX_RETRIES");
+    let c = node(&a, "cfg.h::MAX_RETRIES");
     assert_eq!(c.label, "Const");
     assert_eq!(text(&c.props["value"]), "(4 * 8)");
-    let m = node(&a, "MIN");
+    let m = node(&a, "cfg.h::MIN");
     assert_eq!(m.label, "Macro");
     assert_eq!(text(&m.props["signature"]), "MIN(a, b)");
-    assert!(!a.nodes.iter().any(|n| n.key == "CFG_H"));
+    assert!(!a.nodes.iter().any(|n| n.key.ends_with("::CFG_H")));
 }
 
 /// Globals are Vars with type and initializer as written; `extern` is a
@@ -180,7 +183,7 @@ fn globals_keep_type_and_value() {
         ("state.h", "extern int counter;\n"),
         ("state.c", "int counter = 40 + 2;\n"),
     ]);
-    let v = node(&a, "counter");
+    let v = node(&a, "state.c::counter");
     assert_eq!(v.label, "Var");
     assert_eq!(text(&v.props["signature"]), "int");
     assert_eq!(text(&v.props["value"]), "40 + 2");
@@ -203,8 +206,8 @@ fn statics_shadow_globals_in_their_file() {
             "void helper(void) {}\n\nvoid run_b(void) { helper(); }\n",
         ),
     ]);
-    assert!(has_edge(&a, "run_a", "CALLS", "a.helper"));
-    assert!(has_edge(&a, "run_b", "CALLS", "helper"));
+    assert!(has_edge(&a, "a.c::run_a", "CALLS", "a.c::helper"));
+    assert!(has_edge(&a, "b.c::run_b", "CALLS", "b.c::helper"));
 }
 
 /// A call to a prototype whose definition lives elsewhere still binds —
@@ -219,8 +222,8 @@ fn calls_resolve_through_headers() {
             "#include \"api.h\"\n\nint main(void) {\n    do_work();\n    return 0;\n}\n",
         ),
     ]);
-    assert!(has_edge(&a, "main", "CALLS", "do_work"));
-    let f = node(&a, "do_work");
+    assert!(has_edge(&a, "main.c::main", "CALLS", "api.c::do_work"));
+    let f = node(&a, "api.c::do_work");
     assert_eq!(text(&f.props["file"]), "api.c");
 }
 
@@ -234,7 +237,7 @@ fn libc_is_external_and_pointers_are_counted() {
     )]);
     let p = node(&a, "printf");
     assert!(p.extra_labels.contains(&"External".to_string()));
-    assert!(has_edge(&a, "log_it", "CALLS", "printf"));
+    assert!(has_edge(&a, "m.c::log_it", "CALLS", "printf"));
     note_containing(&a, "function pointer");
     // The system include is an external File.
     assert!(has_edge(&a, "m.c", "IMPORTS", "stdio.h"));
@@ -273,8 +276,8 @@ fn preprocessor_arms_are_walked() {
         "port.c",
         "#ifdef _WIN32\nvoid platform_init(void) {}\n#else\nvoid platform_init_unix(void) {}\n#endif\n",
     )]);
-    node(&a, "platform_init");
-    node(&a, "platform_init_unix");
+    node(&a, "port.c::platform_init");
+    node(&a, "port.c::platform_init_unix");
 }
 
 /// Documentation above a declaration: /** */, /* */, and // runs all count
@@ -285,9 +288,9 @@ fn comments_above_are_docs() {
         "m.c",
         "/** Block doc. */\nvoid a(void) {}\n\n// Line one.\n// Line two.\nvoid b(void) {}\n",
     )]);
-    assert_eq!(text(&node(&a, "a").props["doc_comment"]), "Block doc.");
+    assert_eq!(text(&node(&a, "m.c::a").props["doc_comment"]), "Block doc.");
     assert_eq!(
-        text(&node(&a, "b").props["doc_comment"]),
+        text(&node(&a, "m.c::b").props["doc_comment"]),
         "Line one.\nLine two."
     );
 }
@@ -306,10 +309,13 @@ fn lines_and_files_are_recorded() {
         ("b.h", "void helper(void);\n"),
         ("b.c", "void helper(void) {}\n"),
     ]);
-    let f = node(&a, "caller");
+    let f = node(&a, "a.c::caller");
     assert_eq!(f.props["line"], Value::from(3u64));
     assert_eq!(text(&f.props["file"]), "a.c");
-    assert_eq!(edge(&a, "CALLS", "helper").props["line"], Value::from(4u64));
+    assert_eq!(
+        edge(&a, "CALLS", "b.c::helper").props["line"],
+        Value::from(4u64)
+    );
     assert_eq!(edge(&a, "IMPORTS", "b.h").props["line"], Value::from(1u64));
     // The file node: no line, no `path` (the key is the path), and its
     // includes resolved to the keys of the files they name — link-shaped.
@@ -327,7 +333,7 @@ fn a_parse_error_is_counted_not_fatal() {
         ("bad.c", "template <class T> struct nope {};"),
     ]);
     assert_eq!(a.skipped, 1);
-    node(&a, "fine");
+    node(&a, "ok.c::fine");
 }
 
 /// The result must not depend on where the chunk boundaries fell, and the
@@ -362,7 +368,7 @@ fn deterministic_and_chunk_independent() {
 fn a_document_parses_alone() {
     let facts = parse_document("snippet.c", b"int solo(void) { return 1; }\n", false);
     let a = assemble(facts);
-    node(&a, "solo");
+    node(&a, "snippet.c::solo");
 }
 
 /// include_source attaches the definition as written under `_code`.
@@ -373,10 +379,49 @@ fn include_source_attaches_the_definition() {
     };
     let paths = m.list(".c").unwrap();
     let a = assemble(parse_chunk(&m, &paths, true));
-    let n = node(&a, "shown");
+    let n = node(&a, "m.c::shown");
     assert!(
         text(&n.props["_code"]["$value"]).contains("return 42"),
         "{:?}",
         n.props
     );
+}
+
+/// Two files defining the same name — every tool's `main`, a reference
+/// implementation per variant — are two facts, never a collision: the
+/// file-namespace key keeps them apart, a caller in the defining file binds
+/// to its own, and a caller elsewhere is counted, because which definition
+/// links is build configuration.
+#[test]
+fn duplicate_definitions_stay_apart() {
+    let a = run(vec![
+        (
+            "tools/cli.c",
+            "static void setup(void) {}\n\nint main(void) {\n    setup();\n    return 0;\n}\n",
+        ),
+        ("tools/bench.c", "int main(void) {\n    return 1;\n}\n"),
+        (
+            "lib/compat.c",
+            "void reset(void) {}\n\nvoid use_reset(void) { reset(); }\n",
+        ),
+        ("lib/compat2.c", "void reset(void) {}\n"),
+        ("caller.c", "void elsewhere(void) { reset(); }\n"),
+    ]);
+    // Both mains exist, each under its file.
+    node(&a, "tools/cli.c::main");
+    node(&a, "tools/bench.c::main");
+    // A caller inside a defining file binds to its own definition.
+    assert!(has_edge(
+        &a,
+        "lib/compat.c::use_reset",
+        "CALLS",
+        "lib/compat.c::reset"
+    ));
+    // A caller elsewhere cannot know which reset links — counted, no edge.
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.src == "caller.c::elsewhere" && e.ty == "CALLS")
+    );
+    note_containing(&a, "more than one file");
 }

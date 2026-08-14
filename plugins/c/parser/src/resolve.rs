@@ -1,8 +1,12 @@
-//! The cross-file half. C's linker model, applied to facts: a definition
-//! wins the node over a header's declaration of the same key, a call binds
-//! to this file's statics first (the compiler's own shadowing rule), then
-//! the flat global namespace; `#include "x.h"` resolves against the parsed
-//! file set the way a build's include paths would.
+//! The cross-file half. Identity is `{file}::{name}`; **binding** is C's
+//! linkage model: a call reaches its own file's symbol first (statics shadow
+//! by the compiler's rule, and a file's own definition is nearest), then the
+//! one global definition when the tree holds exactly one, then a unique
+//! declaration when nothing defines the name here, then libc by name — and
+//! is counted when several files define it, because which definition links
+//! is build configuration a parser does not have. A header's declaration
+//! merges into the definition wherever one exists: the definition wins the
+//! node.
 
 use crate::{Edge, FileFacts, Node, Props, edge_at};
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,100 +140,57 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     let mut out = Assembled::default();
 
     // ---- indexes ----------------------------------------------------------
-    // The flat global namespace: name → key, definitions preferred over
-    // declarations, first definition wins (one-definition is the program's
-    // own rule; a violation is counted, not adjudicated).
-    let mut global: BTreeMap<String, (String, bool)> = BTreeMap::new();
-    // file stem → its statics' names → keys.
-    let mut statics: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    // file path (as parsed) → file key, for include resolution.
-    let mut file_keys: BTreeMap<String, String> = BTreeMap::new();
-    let mut redefined = 0usize;
-
+    // Per file: what it declares, by name. Across files: every non-static
+    // definition and declaration of each name.
+    let mut own: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut defs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut decls_only: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for f in &all {
         if f.failed {
             out.skipped += 1;
             continue;
         }
-        file_keys.insert(f.file.clone(), crate::file_key(&f.file));
+        let file_key = crate::file_key(&f.file);
+        let per_file = own.entry(file_key).or_default();
         for d in &f.decls {
-            if d.is_static {
-                statics
-                    .entry(f.stem.clone())
-                    .or_default()
-                    .entry(d.name.clone())
-                    .or_insert_with(|| d.key.clone());
-                continue;
+            per_file
+                .entry(d.name.clone())
+                .or_insert_with(|| d.key.clone());
+            if !d.is_static {
+                if d.is_definition {
+                    defs.entry(d.name.clone()).or_default().push(d.key.clone());
+                } else {
+                    decls_only
+                        .entry(d.name.clone())
+                        .or_default()
+                        .push(d.key.clone());
+                }
             }
-            match global.get(&d.name) {
-                None => {
-                    global.insert(d.name.clone(), (d.key.clone(), d.is_definition));
-                }
-                Some((_, had_def)) => {
-                    if d.is_definition {
-                        if *had_def {
-                            redefined += 1; // two definitions — counted
-                        } else {
-                            global.insert(d.name.clone(), (d.key.clone(), true));
-                        }
-                    }
-                }
+        }
+    }
+    let multiply_defined = defs.values().filter(|v| v.len() > 1).count();
+
+    // A declaration is merged away when any file defines the name: the
+    // definition wins the node, and the prototype's remaining contribution
+    // is its file's IMPORTS edge. Keyed by node key, so a static is never
+    // merged into someone else's definition.
+    let mut suppressed: BTreeSet<String> = BTreeSet::new();
+    let mut merged = 0usize;
+    for f in &all {
+        for d in &f.decls {
+            if !d.is_static && !d.is_definition && defs.contains_key(&d.name) {
+                suppressed.insert(d.key.clone());
+                merged += 1;
             }
         }
     }
 
-    // ---- nodes: definitions beat declarations, first seen wins ----------
-    // Pick per key: any definition's node over any declaration's.
-    let mut best: BTreeMap<String, &Node> = BTreeMap::new();
-    let mut is_def: BTreeMap<String, bool> = BTreeMap::new();
-    let mut contains: BTreeMap<String, &Edge> = BTreeMap::new();
-    let mut merged = 0usize;
-    for f in &all {
-        let defs: BTreeSet<&str> = f
-            .decls
-            .iter()
-            .filter(|d| d.is_definition)
-            .map(|d| d.key.as_str())
-            .collect();
-        for n in &f.nodes {
-            let this_is_def = defs.contains(n.key.as_str()) || n.label == "File";
-            match is_def.get(&n.key) {
-                None => {
-                    best.insert(n.key.clone(), n);
-                    is_def.insert(n.key.clone(), this_is_def);
-                    if let Some(e) = f
-                        .edges
-                        .iter()
-                        .find(|e| e.ty == "CONTAINS" && e.dst == n.key)
-                    {
-                        contains.insert(n.key.clone(), e);
-                    }
-                }
-                Some(false) if this_is_def => {
-                    best.insert(n.key.clone(), n);
-                    is_def.insert(n.key.clone(), true);
-                    if let Some(e) = f
-                        .edges
-                        .iter()
-                        .find(|e| e.ty == "CONTAINS" && e.dst == n.key)
-                    {
-                        contains.insert(n.key.clone(), e);
-                    }
-                    merged += 1;
-                }
-                Some(_) => merged += 1,
-            }
-        }
-    }
+    // ---- nodes ------------------------------------------------------------
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    // Keep file order stable: walk facts again, emit each key once, using
-    // the chosen node.
     for f in &all {
         for n in &f.nodes {
-            if seen.insert(n.key.clone())
-                && let Some(chosen) = best.get(&n.key)
-            {
-                out.nodes.push((*chosen).clone());
+            if !suppressed.contains(&n.key) && seen.insert(n.key.clone()) {
+                out.nodes.push(n.clone());
             }
         }
     }
@@ -242,26 +203,27 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 pending.push(e);
             }
         };
-    // CONTAINS from the chosen side; everything else as written.
-    for e in contains.values() {
-        add_edge(&mut pending, &mut edge_set, (*e).clone());
-    }
     for f in &all {
         for e in &f.edges {
-            if e.ty != "CONTAINS" {
-                add_edge(&mut pending, &mut edge_set, e.clone());
+            if e.ty == "CONTAINS" && suppressed.contains(&e.dst) {
+                continue;
             }
+            add_edge(&mut pending, &mut edge_set, e.clone());
         }
     }
 
     // ---- includes ---------------------------------------------------------
-    // `#include "x.h"` resolves against the parsed set: exact tail match,
-    // shortest surviving candidate — the way an include path would find it.
-    // `<system>` headers are external by declaration.
+    // `#include "x.h"` resolves against the parsed set: same directory
+    // first, then an unambiguous tail anywhere — include paths are build
+    // configuration this parser does not have, so ambiguity is counted.
+    let file_keys: BTreeMap<String, String> = all
+        .iter()
+        .filter(|f| !f.failed)
+        .map(|f| (f.file.clone(), crate::file_key(&f.file)))
+        .collect();
     let mut external: BTreeMap<String, &'static str> = BTreeMap::new();
     let mut missed_includes = 0usize;
     let resolve_include = |from: &str, target: &str| -> Option<String> {
-        // Same directory first.
         let dir = from.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
         let local = if dir.is_empty() {
             target.to_string()
@@ -272,9 +234,6 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         if let Some(k) = file_keys.get(&normal) {
             return Some(k.clone());
         }
-        // Then anywhere in the tree by suffix — include paths are build
-        // configuration this parser does not have; an unambiguous tail
-        // match is certain enough, ambiguity is not.
         let matches: Vec<&String> = file_keys
             .iter()
             .filter(|(p, _)| p.ends_with(target) || p.as_str() == target)
@@ -339,27 +298,58 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     // ---- calls ------------------------------------------------------------
     let mut unresolved = 0usize;
     let mut external_calls = 0usize;
+    let mut ambiguous = 0usize;
     for f in &all {
         unresolved += f.opaque;
-        let own_statics = statics.get(&f.stem);
+        let file_key = crate::file_key(&f.file);
+        let own_names = own.get(&file_key);
         for c in &f.calls {
-            // This file's statics shadow the global name — the compiler's
-            // own rule.
-            if let Some(key) = own_statics.and_then(|s| s.get(&c.name)) {
-                add_edge(
-                    &mut pending,
-                    &mut edge_set,
-                    edge_at(&c.caller, key, "CALLS", c.line),
-                );
-                continue;
+            // Nearest first: this file's own symbol, static or not — the
+            // compiler's shadowing rule, and a definition's own file is
+            // always its caller's best answer.
+            if let Some(key) = own_names.and_then(|m| m.get(&c.name))
+                && !suppressed.contains(key)
+            {
+                {
+                    add_edge(
+                        &mut pending,
+                        &mut edge_set,
+                        edge_at(&c.caller, key, "CALLS", c.line),
+                    );
+                    continue;
+                }
+                // Our own prototype merged into a definition elsewhere —
+                // fall through to the global lookup, which is where it went.
             }
-            if let Some((key, _)) = global.get(&c.name) {
-                add_edge(
-                    &mut pending,
-                    &mut edge_set,
-                    edge_at(&c.caller, key, "CALLS", c.line),
-                );
-                continue;
+            match defs.get(&c.name).map(Vec::as_slice) {
+                Some([one]) => {
+                    add_edge(
+                        &mut pending,
+                        &mut edge_set,
+                        edge_at(&c.caller, one, "CALLS", c.line),
+                    );
+                    continue;
+                }
+                Some(_) => {
+                    // Several files define it; which one links is build
+                    // configuration. Counted, never guessed.
+                    ambiguous += 1;
+                    continue;
+                }
+                None => {}
+            }
+            // Nothing defines it here: a unique declaration is still the
+            // interface — the name is real, the body is elsewhere.
+            if let Some(decl_keys) = decls_only.get(&c.name) {
+                let distinct: BTreeSet<&String> = decl_keys.iter().collect();
+                if distinct.len() == 1 {
+                    add_edge(
+                        &mut pending,
+                        &mut edge_set,
+                        edge_at(&c.caller, decl_keys[0].as_str(), "CALLS", c.line),
+                    );
+                    continue;
+                }
             }
             if LIBC.contains(&c.name.as_str()) {
                 if !seen.contains(&c.name) {
@@ -385,10 +375,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     let mut implied: BTreeSet<String> = BTreeSet::new();
     for e in &out.edges {
         for key in [&e.src, &e.dst] {
-            if !seen.contains(key.as_str())
-                && !external.contains_key(key.as_str())
-                && !best.contains_key(key.as_str())
-            {
+            if !seen.contains(key.as_str()) && !external.contains_key(key.as_str()) {
                 implied.insert(key.clone());
             }
         }
@@ -418,6 +405,13 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
              unexpanded macro, or a library this tree does not hold"
         ));
     }
+    if ambiguous > 0 {
+        out.notes.push(format!(
+            "{ambiguous} call(s) to names defined in more than one file were \
+             left unbound: which definition links is build configuration a \
+             parser does not have"
+        ));
+    }
     if external_calls > 0 {
         out.notes.push(format!(
             "{external_calls} call(s) into the C library, recorded as external \
@@ -433,14 +427,14 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     }
     if merged > 0 {
         out.notes.push(format!(
-            "{merged} declaration(s) merged across files — headers declaring \
-             what a source defines; the definition wins"
+            "{merged} declaration(s) merged into the definition another file \
+             holds — the header pattern; the definition wins"
         ));
     }
-    if redefined > 0 {
+    if multiply_defined > 0 {
         out.notes.push(format!(
-            "{redefined} name(s) defined in more than one file — one-definition \
-             is the program's rule to keep; the first seen is kept here"
+            "{multiply_defined} name(s) defined in more than one file — kept \
+             apart, one node per defining file"
         ));
     }
     out
