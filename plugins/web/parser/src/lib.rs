@@ -178,7 +178,31 @@ fn parse_file(path: &str, text: &str, opts: Options) -> FileFacts {
         let mut w = Walker::new(&mut facts, text, path, opts);
         let rules = w.css(tree.root_node(), 0);
         let mut props = Props::new();
-        props.insert("rules".into(), Value::from(rules));
+        props.insert("rule_count".into(), Value::from(rules));
+        // The stylesheet's declared vocabulary, as key lists the dashboard
+        // can expand and follow — the CONTAINS edges' inspector-visible
+        // mirror. Skipped for minified build artifacts, whose thousands of
+        // entries are noise.
+        if !is_minified(path) {
+            if !facts.classes.is_empty() {
+                let joined = facts
+                    .classes
+                    .iter()
+                    .map(|d| d.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                props.insert("classes".into(), Value::String(joined));
+            }
+            if !facts.vars.is_empty() {
+                let joined = facts
+                    .vars
+                    .iter()
+                    .map(|d| d.key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                props.insert("custom_properties".into(), Value::String(joined));
+            }
+        }
         facts.nodes.insert(
             0,
             Node {

@@ -135,7 +135,16 @@ fn stylesheets_declare_classes_and_custom_properties() {
     let a = run(vec![("css/site.css", CSS)]);
     let s = node(&a, "css/site.css");
     assert_eq!(s.label, "Stylesheet");
-    assert_eq!(s.props["rules"], Value::from(3u64));
+    assert_eq!(s.props["rule_count"], Value::from(3u64));
+    // The declared vocabulary rides the node as linkable key lists.
+    assert_eq!(
+        text(&s.props["classes"]),
+        "css/site.css::.panel, css/site.css::.wide"
+    );
+    assert_eq!(
+        text(&s.props["custom_properties"]),
+        "css/site.css::--brand, css/site.css::--pad"
+    );
 
     assert_eq!(node(&a, "css/site.css::.panel").label, "Class");
     let brand = node(&a, "css/site.css::--brand");
