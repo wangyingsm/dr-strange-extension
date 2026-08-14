@@ -1,0 +1,466 @@
+//! The cross-file half: imports bound against the parsed module set, dotted
+//! chains walked module-by-module, bases turned into EXTENDS — once, over
+//! every chunk's facts together, in chunk order. The result must not depend
+//! on where the chunk boundaries fell.
+
+use crate::{CallKind, Edge, FileFacts, Node, Props, edge_at};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// The assembled result: facts, and an account of what could not be done.
+#[derive(Debug, Default)]
+pub struct Assembled {
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    pub skipped: usize,
+    pub notes: Vec<String>,
+}
+
+/// Callable without being declared anywhere; a call to one is not an edge
+/// worth recording. Builtins, and the exceptions everyone raises.
+const BUILTINS: &[&str] = &[
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "bytearray",
+    "bytes",
+    "callable",
+    "chr",
+    "classmethod",
+    "compile",
+    "dict",
+    "dir",
+    "divmod",
+    "enumerate",
+    "eval",
+    "exec",
+    "filter",
+    "float",
+    "format",
+    "frozenset",
+    "getattr",
+    "globals",
+    "hasattr",
+    "hash",
+    "id",
+    "input",
+    "int",
+    "isinstance",
+    "issubclass",
+    "iter",
+    "len",
+    "list",
+    "locals",
+    "map",
+    "max",
+    "min",
+    "next",
+    "object",
+    "open",
+    "ord",
+    "pow",
+    "print",
+    "property",
+    "range",
+    "repr",
+    "reversed",
+    "round",
+    "set",
+    "setattr",
+    "sorted",
+    "staticmethod",
+    "str",
+    "sum",
+    "super",
+    "tuple",
+    "type",
+    "vars",
+    "zip",
+    "Exception",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "IndexError",
+    "AttributeError",
+    "RuntimeError",
+    "StopIteration",
+    "StopAsyncIteration",
+    "NotImplementedError",
+    "OSError",
+    "IOError",
+    "FileNotFoundError",
+    "PermissionError",
+    "TimeoutError",
+    "ConnectionError",
+    "InterruptedError",
+    "KeyboardInterrupt",
+    "SystemExit",
+    "ArithmeticError",
+    "ZeroDivisionError",
+    "OverflowError",
+    "AssertionError",
+    "LookupError",
+    "NameError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "MemoryError",
+    "RecursionError",
+    "BaseException",
+    "Warning",
+    "DeprecationWarning",
+    "UserWarning",
+    "RuntimeWarning",
+    "FutureWarning",
+];
+
+struct Index {
+    /// Every module this run parsed, by dotted id.
+    modules: BTreeSet<String>,
+    /// module → name → (key, is-plain-value), everything declared at
+    /// module level.
+    decls: BTreeMap<String, BTreeMap<String, (String, bool)>>,
+    /// module → name → key, the star-import surface (`__all__`, or public).
+    exports: BTreeMap<String, BTreeMap<String, String>>,
+    /// class key → its method names, for `self.m()`.
+    class_methods: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Index {
+    /// A name looked up in a module: a declaration, or — for the star
+    /// surface — an export.
+    fn decl(&self, module: &str, name: &str) -> Option<String> {
+        self.decls.get(module)?.get(name).map(|(k, _)| k.clone())
+    }
+}
+
+fn note_external(
+    seen: &BTreeSet<String>,
+    external: &mut BTreeMap<String, &'static str>,
+    key: &str,
+    label: &'static str,
+) {
+    if seen.contains(key) {
+        return;
+    }
+    let have = external.get(key).copied();
+    if have.is_none() || (have == Some("Package") && label != "Package") {
+        external.insert(key.to_string(), label);
+    }
+}
+
+pub fn assemble(all: Vec<FileFacts>) -> Assembled {
+    let mut out = Assembled::default();
+
+    // ---- indexes ----------------------------------------------------------
+    let mut ix = Index {
+        modules: BTreeSet::new(),
+        decls: BTreeMap::new(),
+        exports: BTreeMap::new(),
+        class_methods: BTreeMap::new(),
+    };
+    for f in &all {
+        if f.failed {
+            out.skipped += 1;
+            continue;
+        }
+        ix.modules.insert(f.module_id.clone());
+        let d = ix.decls.entry(f.module_id.clone()).or_default();
+        for l in &f.decls {
+            d.entry(l.name.clone())
+                .or_insert_with(|| (l.key.clone(), l.value));
+        }
+        let e = ix.exports.entry(f.module_id.clone()).or_default();
+        for l in &f.exports {
+            e.entry(l.name.clone()).or_insert_with(|| l.key.clone());
+        }
+        for (class, method) in &f.class_methods {
+            ix.class_methods
+                .entry(format!("{}.{class}", f.module_id))
+                .or_default()
+                .insert(method.clone());
+        }
+    }
+
+    // ---- nodes, first seen wins ------------------------------------------
+    // Two files rarely share a module id; when they do (a `.py` beside its
+    // `.pyi` stub), the first seen is kept and the count says so.
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut merged = 0usize;
+    for f in &all {
+        for n in &f.nodes {
+            if seen.insert(n.key.clone()) {
+                out.nodes.push(n.clone());
+            } else {
+                merged += 1;
+            }
+        }
+    }
+
+    let mut edge_set: BTreeSet<(String, String, String)> = BTreeSet::new();
+    let mut pending: Vec<Edge> = Vec::new();
+    let add_edge =
+        |pending: &mut Vec<Edge>, set: &mut BTreeSet<(String, String, String)>, e: Edge| {
+            if set.insert((e.src.clone(), e.ty.clone(), e.dst.clone())) {
+                pending.push(e);
+            }
+        };
+    for f in &all {
+        for e in &f.edges {
+            add_edge(&mut pending, &mut edge_set, e.clone());
+        }
+    }
+
+    // ---- the package tree -------------------------------------------------
+    // `mypkg` contains `mypkg.core` contains `mypkg.core.utils` — derivable
+    // from the dotted ids, and only claimed where both ends were parsed.
+    for m in &ix.modules {
+        if let Some((parent, _)) = m.rsplit_once('.')
+            && ix.modules.contains(parent)
+        {
+            add_edge(
+                &mut pending,
+                &mut edge_set,
+                Edge {
+                    src: parent.to_string(),
+                    dst: m.clone(),
+                    ty: "CONTAINS".into(),
+                    props: Props::new(),
+                },
+            );
+        }
+    }
+
+    // ---- IMPORTS ----------------------------------------------------------
+    let mut external: BTreeMap<String, &'static str> = BTreeMap::new();
+    for f in &all {
+        for (target, line) in &f.imports {
+            if ix.modules.contains(target) {
+                add_edge(
+                    &mut pending,
+                    &mut edge_set,
+                    edge_at(&f.module_id, target, "IMPORTS", *line),
+                );
+            } else {
+                note_external(&seen, &mut external, target, "Package");
+                add_edge(
+                    &mut pending,
+                    &mut edge_set,
+                    edge_at(&f.module_id, target, "IMPORTS", *line),
+                );
+            }
+        }
+    }
+
+    // ---- calls and bases ---------------------------------------------------
+    let mut unresolved = 0usize;
+    let mut external_calls = 0usize;
+    for f in &all {
+        let bindings: BTreeMap<&str, (&str, &str)> = f
+            .bindings
+            .iter()
+            .map(|b| (b.local.as_str(), (b.target.as_str(), b.member.as_str())))
+            .collect();
+        unresolved += f.opaque;
+
+        // A bare name: local declaration first (shadowing is file truth),
+        // then an imported binding, then the star-import surfaces in import
+        // order, then a builtin, then nothing a parser can say.
+        let resolve_plain = |name: &str,
+                             external: &mut BTreeMap<String, &'static str>,
+                             external_calls: &mut usize|
+         -> Option<Option<String>> {
+            // Some(Some(key)) = resolved; Some(None) = skip silently;
+            // None = unresolved.
+            // A plain value assignment yields to an import binding of the
+            // same name: `try: from x import y / except: y = None` is the
+            // fallback idiom, and the import is the primary.
+            let local = ix
+                .decls
+                .get(&f.module_id)
+                .and_then(|d| d.get(name))
+                .cloned();
+            if let Some((key, is_value)) = &local
+                && !(*is_value && bindings.contains_key(name))
+            {
+                return Some(Some(key.clone()));
+            }
+            if let Some((target, member)) = bindings.get(name) {
+                if member.is_empty() {
+                    // The binding is a module; calling one is not a thing.
+                    return None;
+                }
+                // `from t import x` — x may be t's declaration, or the
+                // submodule t.x (imported for its side or passed around).
+                if let Some(key) = ix.decl(target, member) {
+                    return Some(Some(key));
+                }
+                let submodule = format!("{target}.{member}");
+                if ix.modules.contains(&submodule) {
+                    return None; // calling a module is not a thing
+                }
+                if !ix.modules.contains(*target) {
+                    let key = format!("{target}.{member}");
+                    note_external(&seen, external, &key, "Function");
+                    note_external(&seen, external, target, "Package");
+                    *external_calls += 1;
+                    return Some(Some(key));
+                }
+                return None;
+            }
+            for star in &f.stars {
+                if let Some(key) = ix.exports.get(star).and_then(|e| e.get(name)) {
+                    return Some(Some(key.clone()));
+                }
+            }
+            if BUILTINS.contains(&name) {
+                return Some(None);
+            }
+            None
+        };
+
+        // A dotted chain rooted at a bare name: the root must be an import
+        // binding, and each step walks a submodule until the last resolves
+        // as a declaration. One step onto anything else is an attribute of a
+        // value — a checker's business.
+        let resolve_chain = |parts: &[String],
+                             external: &mut BTreeMap<String, &'static str>,
+                             external_calls: &mut usize|
+         -> Option<Option<String>> {
+            let root = parts.first()?.as_str();
+            let name = parts.last()?.as_str();
+            let mid = &parts[1..parts.len() - 1];
+
+            let (mut module, member) = match bindings.get(root) {
+                Some((t, m)) => (t.to_string(), *m),
+                None => return None,
+            };
+            if !member.is_empty() {
+                // `from a import b` then `b.c()` — b must be the submodule.
+                module = format!("{module}.{member}");
+            }
+            for part in mid {
+                module = format!("{module}.{part}");
+            }
+            if ix.modules.contains(&module) {
+                return match ix.decl(&module, name) {
+                    Some(key) => Some(Some(key)),
+                    None => None,
+                };
+            }
+            // Not parsed here: external if its root is, an attribute of a
+            // value otherwise.
+            let root_module = module.split('.').next().unwrap_or(&module).to_string();
+            if !ix.modules.contains(&root_module) && ix.decl(&f.module_id, root).is_none() {
+                let key = format!("{module}.{name}");
+                note_external(&seen, external, &key, "Function");
+                note_external(&seen, external, &root_module, "Package");
+                *external_calls += 1;
+                return Some(Some(key));
+            }
+            None
+        };
+
+        for c in &f.calls {
+            let resolved = match &c.kind {
+                CallKind::Plain(name) => resolve_plain(name, &mut external, &mut external_calls),
+                CallKind::Chain(parts) => resolve_chain(parts, &mut external, &mut external_calls),
+                CallKind::This { class, method } => {
+                    let class_key = format!("{}.{class}", f.module_id);
+                    if ix
+                        .class_methods
+                        .get(&class_key)
+                        .is_some_and(|ms| ms.contains(method))
+                    {
+                        Some(Some(format!("{class_key}.{method}")))
+                    } else {
+                        None
+                    }
+                }
+            };
+            match resolved {
+                Some(Some(key)) => add_edge(
+                    &mut pending,
+                    &mut edge_set,
+                    edge_at(&c.caller, &key, "CALLS", c.line),
+                ),
+                Some(None) => {}
+                None => unresolved += 1,
+            }
+        }
+
+        for (class_key, written, line) in &f.bases {
+            let parts: Vec<String> = written.split('.').map(str::to_string).collect();
+            let resolved = if parts.len() == 1 {
+                resolve_plain(&parts[0], &mut external, &mut external_calls)
+            } else {
+                resolve_chain(&parts, &mut external, &mut external_calls)
+            };
+            match resolved {
+                Some(Some(key)) => {
+                    if !seen.contains(&key) {
+                        // A base is a class; say so on the stand-in.
+                        external.insert(key.clone(), "Class");
+                    }
+                    add_edge(
+                        &mut pending,
+                        &mut edge_set,
+                        edge_at(class_key, &key, "EXTENDS", *line),
+                    );
+                }
+                // `object`, `Exception` — extending a builtin says little
+                // worth a stand-in.
+                Some(None) => {}
+                None => unresolved += 1,
+            }
+        }
+    }
+    out.edges = pending;
+
+    // ---- implied and external nodes --------------------------------------
+    let mut implied: BTreeSet<String> = BTreeSet::new();
+    for e in &out.edges {
+        for key in [&e.src, &e.dst] {
+            if !seen.contains(key.as_str()) && !external.contains_key(key.as_str()) {
+                implied.insert(key.clone());
+            }
+        }
+    }
+    for key in implied {
+        seen.insert(key.clone());
+        out.nodes.push(Node {
+            key,
+            label: "Type".into(),
+            extra_labels: Vec::new(),
+            props: Props::new(),
+        });
+    }
+    for (key, label) in &external {
+        out.nodes.push(Node {
+            key: key.clone(),
+            label: (*label).into(),
+            extra_labels: vec!["External".into()],
+            props: Props::new(),
+        });
+    }
+
+    // ---- the account ------------------------------------------------------
+    if unresolved > 0 {
+        out.notes.push(format!(
+            "{unresolved} call(s) left unresolved: a method or attribute names \
+             a value whose type only a checker would know"
+        ));
+    }
+    if external_calls > 0 {
+        out.notes.push(format!(
+            "{external_calls} call(s) into other packages, recorded as external \
+             nodes carrying the dotted path and nothing else"
+        ));
+    }
+    if merged > 0 {
+        out.notes.push(format!(
+            "{merged} declaration(s) shared a key across files — a stub beside \
+             its module, or a name rebound; the first seen is kept"
+        ));
+    }
+    out
+}

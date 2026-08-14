@@ -1,0 +1,20 @@
+[package]
+name = "drsg-py-parser"
+description = "Python into facts — the parsing half of the drsg py plugin"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# ruff's parser rather than a hand one: the parser behind ruff and uv, pure
+# Rust, current with the language. Parse-only — no type inference, which is
+# the point: facts a parser is certain of, nothing a checker would infer.
+[dependencies]
+ruff_python_parser = "0.0.9"
+ruff_python_ast = "0.0.9"
+ruff_source_file = "0.0.9"
+ruff_text_size = "0.0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+members = []

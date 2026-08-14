@@ -34,6 +34,9 @@ rust-plugin:
 ts-plugin:
     cd plugins/ts/component && cargo build --release --target wasm32-wasip2
 
+py-plugin:
+    cd plugins/py/component && cargo build --release --target wasm32-wasip2
+
 toml-plugin:
     cd plugins/toml && cargo build --release --target wasm32-wasip2
 
@@ -43,3 +46,4 @@ test:
     cd plugins/rust/parser && cargo test
     cd plugins/go/parser && go test ./...
     cd plugins/ts/parser && cargo test
+    cd plugins/py/parser && cargo test

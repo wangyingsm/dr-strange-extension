@@ -1,0 +1,23 @@
+[package]
+name = "drsg-plugin-py"
+description = "The drsg Python preprocessor plugin: the parser, wrapped for the wasm contract"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK, the parser, and the serializers the boundary uses — nothing else
+# of drsg's. This is the same position a third-party author is in, and the
+# claim is checked (`cargo tree` must show no dr-strange-core, no wasmtime).
+[dependencies]
+dr-strange-ext = { path = "../../../sdk/rust" }
+drsg-py-parser = { path = "../parser" }
+serde_json = "1"
+# The partial format: binary and self-describing, for the same reason the
+# rust plugin uses it — the facts carry serde_json::Value properties.
+rmp-serde = "1"
+
+[workspace]
+members = []

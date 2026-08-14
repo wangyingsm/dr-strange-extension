@@ -16,14 +16,16 @@ sdk/go/                the Go SDK: generated bindings and the ext package
 plugins/rust/          the Rust parser (parser/ native + component/ wrapper)
 plugins/go/            the Go parser, same split
 plugins/ts/            TypeScript *and* JavaScript — one swc parser, both
+plugins/py/            Python, on ruff's parser
 plugins/toml/          the smallest plugin that is still a plugin
 ```
 
-Rust, Go and TS/JS are the first three of five language ecosystems planned
-here — Java and Python follow. Each ecosystem gets an SDK under `sdk/`
-publishing to its own registry; the `ts` plugin itself is written in Rust on
-`swc` (the parser behind Next.js) — the sdk/ts + componentize-js proof is
-its own later slice, so SDK risk never touches a flagship parser.
+Rust, Go, TS/JS and Python cover four of the five language ecosystems
+planned here — Java remains. Each ecosystem gets an SDK under `sdk/`
+publishing to its own registry; the `ts` and `py` plugins themselves are
+written in Rust (on `swc` and on ruff's parser respectively) — the sdk/ts
+and sdk/py ecosystem proofs are their own later slices, so SDK risk never
+touches a flagship parser.
 
 Every SDK generates from `wit/preprocess.wit`. Copies exist where packaging
 demands one (a crate cannot publish a file outside itself); `just check-wit`
@@ -66,11 +68,12 @@ just go-plugin
 drsg plugin install plugins/go/component/go.wasm
 ```
 
-TypeScript/JavaScript (stable Rust, like the Rust plugin):
+TypeScript/JavaScript and Python (stable Rust, like the Rust plugin):
 
 ```
-just ts-plugin
+just ts-plugin && just py-plugin
 drsg plugin install plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm
+drsg plugin install plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm
 ```
 
 The Go build pins `-scheduler=none -gc=leaking` — the reasons are written on
