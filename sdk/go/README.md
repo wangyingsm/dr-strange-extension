@@ -1,5 +1,7 @@
 # sdk/go — the Go SDK
 
+English · [简体中文](README_CN.md)
+
 The one module a Go plugin author takes:
 
 ```console

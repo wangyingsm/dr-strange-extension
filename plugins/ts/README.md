@@ -1,5 +1,7 @@
 # plugin: ts
 
+English · [简体中文](README_CN.md)
+
 Parses TypeScript **and** JavaScript into graph facts. Manifest `ts@1`,
 claims `.ts .tsx .mts .cts .js .jsx .mjs .cjs` — one parser covers the whole
 ecosystem, so a mixed repository digests as facts instead of half prose.

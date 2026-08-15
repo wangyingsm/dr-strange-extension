@@ -1,5 +1,7 @@
 # plugin: web
 
+English · [简体中文](README_CN.md)
+
 Parses HTML **and** CSS into graph facts — one plugin for both, manifest
 `web@1`, claims `.html .htm .css`. One plugin deliberately: the cross-file
 fact a frontend plane wants — *which stylesheet's `.btn` styles which page*

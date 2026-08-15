@@ -1,5 +1,7 @@
 # dr-strange-ext — the Rust SDK
 
+English · [简体中文](README_CN.md)
+
 The one dependency a Rust plugin author takes. It carries the generated WIT
 bindings for the `drsg:preprocess` contract, an ergonomic layer over them,
 and nothing else of ours: the dependency list is `wit-bindgen` and

@@ -1,5 +1,7 @@
 # plugin: py
 
+English · [简体中文](README_CN.md)
+
 Parses Python into graph facts. Manifest `py@1`, claims `.py .pyi .pyw`.
 Built on [ruff](https://github.com/astral-sh/ruff)'s `ruff_python_parser` —
 the parser behind ruff and uv, current with the language (3.12 `type`

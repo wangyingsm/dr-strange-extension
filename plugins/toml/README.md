@@ -1,5 +1,7 @@
 # plugin: toml
 
+English · [简体中文](README_CN.md)
+
 The smallest plugin that is still a plugin. Manifest `toml@1`, claims
 `.toml`; emits one `Manifest` node per file, with the byte count and a
 described `path`.
