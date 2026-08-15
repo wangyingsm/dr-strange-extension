@@ -10,7 +10,7 @@ use drsg_rust_parser::{Assembled, FileFacts, Files, assemble, parse_chunk, parse
 
 /// Shown beside the name in UIs (`manifest.logo`): an original mark
 /// evoking the language, not its trademarked logo.
-const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#ce6d29' stroke-width='1.8' stroke-linecap='round'><circle cx='12' cy='12' r='7'/><circle cx='12' cy='12' r='2.6'/><path d='M12 2.2V5M12 19v2.8M2.2 12H5M19 12h2.8M5.1 5.1l1.9 2M17 16.9l1.9 2M5.1 18.9l1.9-2M17 7.1l1.9-2'/></svg>";
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='10' fill='none' stroke='#8b4513' stroke-width='2.4' stroke-dasharray='2 1.6'/><circle cx='12' cy='12' r='8.2' fill='#8b4513'/><circle cx='12' cy='5.7' r='0.85' fill='#5e2f0d'/><circle cx='18' cy='10.05' r='0.85' fill='#5e2f0d'/><circle cx='6' cy='10.05' r='0.85' fill='#5e2f0d'/><circle cx='8.3' cy='17.1' r='0.85' fill='#5e2f0d'/><circle cx='15.7' cy='17.1' r='0.85' fill='#5e2f0d'/><text x='12' y='16' font-family='Georgia,serif' font-size='10.5' font-weight='700' fill='#fff' text-anchor='middle'>R</text></svg>";
 
 struct RustPlugin;
 
