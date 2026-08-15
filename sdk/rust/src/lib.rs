@@ -28,6 +28,7 @@
 //!             name: "toml".into(),
 //!             version: "1".into(),
 //!             extensions: vec!["toml".into()],
+//!             logo: None, // an inline SVG here shows beside the name in UIs
 //!         }
 //!     }
 //!

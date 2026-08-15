@@ -42,6 +42,7 @@ impl Guest for RustPlugin {
             // facts are the same; `_generated_by` says which produced them.
             version: "2".into(),
             extensions: vec!["rs".into()],
+            logo: None,
         }
     }
 

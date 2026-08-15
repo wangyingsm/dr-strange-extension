@@ -30,6 +30,10 @@ type Manifest struct {
 	Version string
 	// Extensions claimed, without the dot: ["go"].
 	Extensions []string
+	// Logo is an optional inline SVG shown beside the plugin's name in UIs —
+	// the whole <svg>…</svg> element as a string. Empty means the UI shows
+	// its default mark. Rendered without script execution.
+	Logo string
 }
 
 // Doc is a single pushed document: a name and its bytes.
@@ -99,10 +103,15 @@ type Plugin interface {
 func Register(p Plugin) {
 	pp.Exports.Describe = func() pp.Manifest {
 		m := p.Describe()
+		logo := cm.None[string]()
+		if m.Logo != "" {
+			logo = cm.Some(m.Logo)
+		}
 		return pp.Manifest{
 			Name:       m.Name,
 			Version:    m.Version,
 			Extensions: cm.ToList(m.Extensions),
+			Logo:       logo,
 		}
 	}
 

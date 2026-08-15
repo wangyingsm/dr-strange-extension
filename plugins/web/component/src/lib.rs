@@ -43,6 +43,7 @@ impl Guest for WebPlugin {
             name: "web".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
+            logo: None,
         }
     }
 

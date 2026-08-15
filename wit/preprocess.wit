@@ -60,6 +60,11 @@ interface preprocessor {
         version: string,
         /// Extensions this handles, lowercase and without the dot.
         extensions: list<string>,
+        /// An inline SVG for UIs to show beside the plugin's name — the
+        /// whole `<svg>…</svg>` element as a string, small enough to embed.
+        /// `none` means the UI shows its default mark instead. Rendered
+        /// without script execution, so keep it plain shapes and paths.
+        logo: option<string>,
     }
 
     /// A single document — an upload, a fetched body, one file.

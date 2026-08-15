@@ -17,6 +17,7 @@ import (
 //		name: string,
 //		version: string,
 //		extensions: list<string>,
+//		logo: option<string>,
 //	}
 type Manifest struct {
 	_ cm.HostLayout `json:"-"`
@@ -29,6 +30,12 @@ type Manifest struct {
 
 	// Extensions this handles, lowercase and without the dot.
 	Extensions cm.List[string] `json:"extensions"`
+
+	// An inline SVG for UIs to show beside the plugin's name — the
+	// whole `<svg>…</svg>` element as a string, small enough to embed.
+	// `none` means the UI shows its default mark instead. Rendered
+	// without script execution, so keep it plain shapes and paths.
+	Logo cm.Option[string] `json:"logo"`
 }
 
 // Doc represents the record "drsg:preprocess/preprocessor@1.0.0#doc".

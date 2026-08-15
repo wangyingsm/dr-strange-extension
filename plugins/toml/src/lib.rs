@@ -10,7 +10,9 @@
 //! both phases of the contract — `parse` runs it per chunk, `assemble`
 //! concatenates in chunk order.
 
-use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin};
+use dr_strange_ext::{
+    Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin,
+};
 
 struct Toml;
 
@@ -20,6 +22,7 @@ impl Simple for Toml {
             name: "toml".into(),
             version: "1".into(),
             extensions: vec!["toml".into()],
+            logo: None,
         }
     }
 
