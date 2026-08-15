@@ -8,6 +8,10 @@ use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
 use dr_strange_ext::export_plugin;
 use drsg_java_parser::{EXTENSIONS, FileFacts, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#5382a1' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M5 10.5h11v5.5a4 4 0 0 1-4 4H9a4 4 0 0 1-4-4z'/><path d='M16 11.5h1.5a2.5 2.5 0 0 1 0 5H16'/><path d='M9 7.5c0-1.5 1.5-1.5 1.5-3M12.5 7.5c0-1.5 1.5-1.5 1.5-3' stroke='#f8981d'/></svg>";
+
 struct JavaPlugin;
 
 /// The parser reads through the host — the same adapter shape as the rust
@@ -40,7 +44,7 @@ impl Guest for JavaPlugin {
             name: "java".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

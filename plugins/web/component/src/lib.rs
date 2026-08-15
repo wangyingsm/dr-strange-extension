@@ -8,6 +8,10 @@ use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
 use dr_strange_ext::export_plugin;
 use drsg_web_parser::{EXTENSIONS, FileFacts, Options, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#e44d26' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><path d='M8 6l-5.5 6L8 18'/><path d='M16 6l5.5 6L16 18'/><path d='M13.4 4l-2.8 16'/></svg>";
+
 struct WebPlugin;
 
 /// The parser reads through the host — the same adapter shape as the rust
@@ -43,7 +47,7 @@ impl Guest for WebPlugin {
             name: "web".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

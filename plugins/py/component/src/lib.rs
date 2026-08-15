@@ -8,6 +8,10 @@ use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
 use dr_strange_ext::export_plugin;
 use drsg_py_parser::{EXTENSIONS, FileFacts, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke-linecap='round'><path d='M16.5 4.5c-7-1.5-10 1.5-5.5 6c4.5 4.5 1.5 7.5-5.5 6' stroke='#3776ab' stroke-width='2.8'/><circle cx='16.6' cy='4.6' r='1.6' fill='#ffd43b'/></svg>";
+
 struct PyPlugin;
 
 /// The parser reads through the host — the same adapter shape as the rust
@@ -40,7 +44,7 @@ impl Guest for PyPlugin {
             name: "py".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

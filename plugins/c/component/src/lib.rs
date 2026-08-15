@@ -8,6 +8,10 @@ use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
 use dr_strange_ext::export_plugin;
 use drsg_c_parser::{EXTENSIONS, FileFacts, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M12 1.8l8.8 5.1v10.2L12 22.2l-8.8-5.1V6.9z' fill='#659ad2'/><text x='12' y='15.8' font-family='system-ui,sans-serif' font-size='10' font-weight='700' fill='#fff' text-anchor='middle'>C</text></svg>";
+
 struct CPlugin;
 
 /// The parser reads through the host — the same adapter shape as the rust
@@ -40,7 +44,7 @@ impl Guest for CPlugin {
             name: "c".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

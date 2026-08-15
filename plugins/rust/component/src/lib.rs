@@ -8,6 +8,10 @@
 use dr_strange_ext::{Guest, Input, Manifest, Output, Report, export_plugin, host};
 use drsg_rust_parser::{Assembled, FileFacts, Files, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#ce6d29' stroke-width='1.8' stroke-linecap='round'><circle cx='12' cy='12' r='7'/><circle cx='12' cy='12' r='2.6'/><path d='M12 2.2V5M12 19v2.8M2.2 12H5M19 12h2.8M5.1 5.1l1.9 2M17 16.9l1.9 2M5.1 18.9l1.9-2M17 7.1l1.9-2'/></svg>";
+
 struct RustPlugin;
 
 /// The host interface, as the parser's `Files` trait.
@@ -42,7 +46,7 @@ impl Guest for RustPlugin {
             // facts are the same; `_generated_by` says which produced them.
             version: "2".into(),
             extensions: vec!["rs".into()],
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

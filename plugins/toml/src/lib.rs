@@ -14,6 +14,10 @@ use dr_strange_ext::{
     Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin,
 };
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='#9c4221'/><path d='M7 7.5h10M12 7.5V17' stroke='#fff' stroke-width='2' stroke-linecap='round'/></svg>";
+
 struct Toml;
 
 impl Simple for Toml {
@@ -22,7 +26,7 @@ impl Simple for Toml {
             name: "toml".into(),
             version: "1".into(),
             extensions: vec!["toml".into()],
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 

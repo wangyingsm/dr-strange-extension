@@ -8,6 +8,10 @@ use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
 use dr_strange_ext::export_plugin;
 use drsg_ts_parser::{EXTENSIONS, FileFacts, assemble, parse_chunk, parse_document};
 
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='3' y='3' width='18' height='18' rx='3' fill='#3178c6'/><text x='12' y='16' font-family='system-ui,sans-serif' font-size='8.5' font-weight='700' fill='#fff' text-anchor='middle'>TS</text></svg>";
+
 struct TsPlugin;
 
 /// The parser reads through the host — the same adapter shape as the rust
@@ -40,7 +44,7 @@ impl Guest for TsPlugin {
             name: "ts".into(),
             version: "1".into(),
             extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
-            logo: None,
+            logo: Some(LOGO.into()),
         }
     }
 
