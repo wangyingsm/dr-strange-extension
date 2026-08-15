@@ -1349,3 +1349,32 @@ fn file_paths_are_crate_root_relative() {
         .expect("the function");
     assert_eq!(f.props["file"], Value::String("src/compute/mod.rs".into()));
 }
+
+/// Impl methods become nodes at assemble, where the file is no longer in
+/// hand — the live serve-watch drill caught them as the one node kind
+/// without file attribution, invisible to an incremental sync.
+#[test]
+fn impl_methods_carry_their_file_like_everything_else() {
+    let t = Tree::new("method-file");
+    t.write(
+        "Cargo.toml",
+        "[package]\nname = \"k\"\nversion = \"0.0.0\"\n",
+    );
+    t.write(
+        "src/lib.rs",
+        "pub struct S;\nimpl S {\n    pub fn m(&self) {}\n    pub fn assoc() {}\n}\n",
+    );
+    let out = run(&t);
+    for suffix in ["S::m", "S::assoc"] {
+        let n = out
+            .nodes
+            .iter()
+            .find(|n| n.key.ends_with(suffix))
+            .unwrap_or_else(|| panic!("missing {suffix}"));
+        assert_eq!(
+            n.props.get("file"),
+            Some(&Value::String("src/lib.rs".into())),
+            "{suffix} lost its file"
+        );
+    }
+}

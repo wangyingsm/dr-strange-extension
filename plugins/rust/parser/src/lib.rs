@@ -244,6 +244,16 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
                 .insert("file".into(), Value::String(source_path(path)));
         }
     }
+    // Impl methods become nodes only at assemble, where the file is no longer
+    // in hand — their props are stamped here, or `Method` nodes would be the
+    // one kind without file attribution (an incremental sync couldn't tell a
+    // deleted method from one it merely didn't look at).
+    for b in &mut f.impls {
+        for m in &mut b.methods {
+            m.props
+                .insert("file".into(), Value::String(source_path(path)));
+        }
+    }
     f
 }
 
