@@ -139,6 +139,12 @@ pub struct FileFacts {
     path: String,
     /// `(caller key, what it called)`, resolved once every file is known.
     calls: Vec<(String, Call)>,
+    /// `(function key, declared return type)` for every free function whose
+    /// return is a plain path — what types a `let x = f();` receiver.
+    returns: Vec<(String, String)>,
+    /// `(caller key, local name, how its type is known)` — the bindings whose
+    /// type a parser *can* know, kept for method-call resolution.
+    local_hints: Vec<(String, String, LocalHint)>,
     /// `impl` blocks, held whole until every file is known — see [`walk_impl`].
     impls: Vec<ImplBlock>,
     /// `(module, macro path, arguments)` for each item-position invocation —
@@ -179,6 +185,10 @@ struct Call {
     name: String,
     /// The path as written, when the call site wrote one.
     path: Option<String>,
+    /// A method call's receiver, when it is a bare name — `txn` in
+    /// `txn.remove(…)`, `self` in `self.close()`. A local whose type the
+    /// body declared is the one thing that makes such a call resolvable.
+    recv: Option<String>,
     /// The call site's line. Not part of identity: the same callee named
     /// twice in one body is one fact, and the first site is the line —
     /// `BTreeSet::insert` keeps the first, and visiting order is source
@@ -188,7 +198,7 @@ struct Call {
 
 impl PartialEq for Call {
     fn eq(&self, other: &Self) -> bool {
-        (&self.name, &self.path) == (&other.name, &other.path)
+        (&self.name, &self.path, &self.recv) == (&other.name, &other.path, &other.recv)
     }
 }
 impl Eq for Call {}
@@ -199,8 +209,22 @@ impl PartialOrd for Call {
 }
 impl Ord for Call {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (&self.name, &self.path).cmp(&(&other.name, &other.path))
+        (&self.name, &self.path, &self.recv).cmp(&(&other.name, &other.path, &other.recv))
     }
+}
+
+/// How a local's type is known without being a compiler.
+///
+/// Only the two deterministic sources are kept: an annotation is the type
+/// written down, and a plain-call initializer names a function whose declared
+/// return type is on record. Anything else — field access, method chains,
+/// generics — is a checker's job and stays out.
+#[derive(Clone, Serialize, Deserialize)]
+enum LocalHint {
+    /// `let x = f(…);` — x's type is whatever `f` declares it returns.
+    Returns(String),
+    /// `let x: T = …;` — the annotation, as written.
+    Typed(String),
 }
 
 fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> FileFacts {
@@ -385,6 +409,12 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                 f.edges
                     .push(edge_at(parent, &key, "CONTAINS", line_of(&func.sig.ident)));
                 collect_calls(&key, &func.block, f);
+                if let Some(ret) = ret_path(&func.sig) {
+                    f.returns.push((key.clone(), ret));
+                }
+                for (ident, hint) in local_hints(&func.block) {
+                    f.local_hints.push((key.clone(), ident, hint));
+                }
             }
             syn::Item::Struct(s) => {
                 simple(f, parent, &s.ident, "Struct", &s.attrs, &s.vis);
@@ -602,6 +632,8 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                     label: label.to_string(),
                     props,
                     calls: call_names(&m.block),
+                    ret: ret_path(&m.sig),
+                    locals: local_hints(&m.block),
                     line: line_of(&m.sig.ident),
                 })
             }
@@ -644,6 +676,11 @@ struct ImplMethod {
     label: String,
     props: Props,
     calls: BTreeSet<Call>,
+    /// Declared return type when it is a plain path; `Self` is resolved to
+    /// the impl's type at assemble, where the type's key is known.
+    ret: Option<String>,
+    /// The body's type-known locals, for its method calls.
+    locals: Vec<(String, LocalHint)>,
 }
 
 /// Record every call this body makes, for later resolution.
@@ -664,15 +701,23 @@ fn call_names(block: &syn::Block) -> BTreeSet<Call> {
                 self.0.insert(Call {
                     name: last.ident.to_string(),
                     path: Some(path_of(&p.path)),
+                    recv: None,
                     line: line_of(node),
                 });
             }
             syn::visit::visit_expr_call(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+            let recv = match &*node.receiver {
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                    Some(p.path.segments[0].ident.to_string())
+                }
+                _ => None,
+            };
             self.0.insert(Call {
                 name: node.method.to_string(),
                 path: None,
+                recv,
                 line: line_of(node),
             });
             syn::visit::visit_expr_method_call(self, node);
@@ -681,6 +726,62 @@ fn call_names(block: &syn::Block) -> BTreeSet<Call> {
     let mut names = BTreeSet::new();
     Calls(&mut names).visit_block(block);
     names
+}
+
+/// The locals whose type this body states outright.
+///
+/// First binding wins on a name bound twice: the calls it might type were
+/// themselves deduplicated to their first site.
+fn local_hints(block: &syn::Block) -> Vec<(String, LocalHint)> {
+    struct Hints<'a>(&'a mut Vec<(String, LocalHint)>);
+    impl<'ast> Visit<'ast> for Hints<'_> {
+        fn visit_local(&mut self, node: &'ast syn::Local) {
+            let hinted = match &node.pat {
+                syn::Pat::Type(t) => match (&*t.pat, plain_type_path(&t.ty)) {
+                    (syn::Pat::Ident(i), Some(ty)) => {
+                        Some((i.ident.to_string(), LocalHint::Typed(ty)))
+                    }
+                    _ => None,
+                },
+                syn::Pat::Ident(i) => node.init.as_ref().and_then(|init| {
+                    if let syn::Expr::Call(c) = &*init.expr
+                        && let syn::Expr::Path(p) = &*c.func
+                    {
+                        Some((i.ident.to_string(), LocalHint::Returns(path_of(&p.path))))
+                    } else {
+                        None
+                    }
+                }),
+                _ => None,
+            };
+            if let Some((ident, hint)) = hinted
+                && !self.0.iter().any(|(n, _)| n == &ident)
+            {
+                self.0.push((ident, hint));
+            }
+            syn::visit::visit_local(self, node);
+        }
+    }
+    let mut out = Vec::new();
+    Hints(&mut out).visit_block(block);
+    out
+}
+
+/// A type that *is* a path — `Txn`, `db::Txn`, `&mut Txn` — or nothing.
+///
+/// Generic arguments disqualify: the receiver in `let x = f()` where `f`
+/// returns `Option<Txn>` is an `Option`, and its methods are std's, not
+/// `Txn`'s. References are looked through, since method resolution does.
+fn plain_type_path(ty: &syn::Type) -> Option<String> {
+    match ty {
+        syn::Type::Reference(r) => plain_type_path(&r.elem),
+        syn::Type::Path(p)
+            if p.qself.is_none() && p.path.segments.iter().all(|s| s.arguments.is_none()) =>
+        {
+            Some(path_of(&p.path))
+        }
+        _ => None,
+    }
 }
 
 /// Names bound by `let` in this body, deduplicated and sorted.
@@ -817,11 +918,29 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // list the parse put on the node.
     let mut import_targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut macro_invocations = 0usize;
+    // Receiver typing (P3): every function's declared return type, and every
+    // body's type-known locals — both expanded through the writing file's
+    // imports here, while that file is still in hand.
+    let mut returns_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut local_inits: BTreeMap<(String, String), LocalHint> = BTreeMap::new();
 
     let aliases = build_aliases(&files, &declared);
 
     for f in &files {
         let imports = import_index(&f.imports);
+
+        for (key, ret) in &f.returns {
+            returns_map.insert(key.clone(), expand_path(ret, &imports, &f.module));
+        }
+        for (caller, ident, hint) in &f.local_hints {
+            let expanded = match hint {
+                LocalHint::Returns(p) => LocalHint::Returns(expand_path(p, &imports, &f.module)),
+                LocalHint::Typed(t) => LocalHint::Typed(expand_path(t, &imports, &f.module)),
+            };
+            local_inits
+                .entry((caller.clone(), ident.clone()))
+                .or_insert(expanded);
+        }
 
         // Every `use` becomes an edge to what it names. An import that lands
         // on something this tree declares points at the real node; one that
@@ -949,17 +1068,43 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 impl_edges.push(edge_at(&self_key, &mkey, "HAS_METHOD", m.line));
                 scopes.insert(mkey.clone(), b.module.clone());
                 fns.entry(m.name.clone()).or_default().push(mkey.clone());
+                // Into `declared` too: a method is as much a path target as a
+                // free function, and both path- and receiver-resolution end
+                // on a declared-key check.
+                declared.insert(mkey.clone());
+                // `Self` means this block's type, and only this block knows
+                // which — rewritten here for paths, returns and locals alike.
+                let deself = |p: &str| match p.strip_prefix("Self::") {
+                    Some(rest) => format!("{self_key}::{rest}"),
+                    None => expand_path(p, &imports, &b.module),
+                };
+                if let Some(ret) = &m.ret {
+                    let expanded = if ret == "Self" {
+                        self_key.clone()
+                    } else {
+                        deself(ret)
+                    };
+                    returns_map.insert(mkey.clone(), expanded);
+                }
+                for (ident, hint) in &m.locals {
+                    let expanded = match hint {
+                        LocalHint::Typed(t) if t == "Self" => LocalHint::Typed(self_key.clone()),
+                        LocalHint::Typed(t) => LocalHint::Typed(deself(t)),
+                        LocalHint::Returns(p) => LocalHint::Returns(deself(p)),
+                    };
+                    local_inits
+                        .entry((mkey.clone(), ident.clone()))
+                        .or_insert(expanded);
+                }
                 impl_calls.extend(m.calls.iter().map(|c| {
-                    let path = c
-                        .path
-                        .as_deref()
-                        .map(|p| expand_path(p, &imports, &b.module));
+                    let path = c.path.as_deref().map(&deself);
                     (
                         mkey.clone(),
                         f.path.clone(),
                         Call {
                             path,
                             name: c.name.clone(),
+                            recv: c.recv.clone(),
                             line: c.line,
                         },
                     )
@@ -1025,12 +1170,17 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // per site carrying the reason. The report still counts; the graph now
     // also *shows*, so an agent's context names its blind spots.
     let mut unresolved_nodes: BTreeMap<String, Node> = BTreeMap::new();
+    // One CALLS edge per (caller, target): `recv` joining call identity means
+    // `a.m()` and `b.m()` both survive parse, and whichever resolution they
+    // take must still fold to a single fact.
+    let mut emitted: BTreeSet<(String, String)> = BTreeSet::new();
     let unresolved_edge = |nodes: &mut BTreeMap<String, Node>,
-                               edges: &mut Vec<Edge>,
-                               caller: &str,
-                               file: &str,
-                               call: &Call,
-                               reason: String| {
+                           edges: &mut Vec<Edge>,
+                           emitted: &mut BTreeSet<(String, String)>,
+                           caller: &str,
+                           file: &str,
+                           call: &Call,
+                           reason: String| {
         let key = format!("?::{file}::{}", call.name);
         nodes.entry(key.clone()).or_insert_with(|| Node {
             key: key.clone(),
@@ -1038,6 +1188,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             extra_labels: Vec::new(),
             props: props([("name", call.name.clone()), ("file", file.to_string())]),
         });
+        if !emitted.insert((caller.to_string(), key.clone())) {
+            return;
+        }
         let written = call.path.clone().unwrap_or_else(|| call.name.clone());
         let mut e = edge_at(caller, &key, "CALLS", call.line);
         stamp(&mut e, "unresolved", "none", &written);
@@ -1045,72 +1198,158 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         edges.push(e);
     };
 
+    // Deterministic receiver typing (P3). `self.m()` is the impl's own type;
+    // `x.m()` types x through its annotation or its initializer's declared
+    // return. Every step reads something the source wrote — a miss at any of
+    // them falls to the ledger, never to a guess.
+    let typed_target = |caller: &str, call: &Call| -> Option<(String, &'static str)> {
+        let recv = call.recv.as_deref()?;
+        let resolve_type = |written: &str, module: &str| -> Option<String> {
+            if declared.contains(written) {
+                return Some(written.to_string());
+            }
+            if written.contains("::") {
+                return [written.to_string(), format!("{module}::{written}")]
+                    .into_iter()
+                    .find_map(|c| follow_reexports(&c, &aliases, &declared));
+            }
+            types
+                .get(written)
+                .and_then(|cands| pick_in_scope(module, cands, &scopes))
+                .cloned()
+        };
+        let ty = if recv == "self" {
+            // `<Type as Trait>::m` and `path::Type::m` both name their type.
+            match caller.strip_prefix('<') {
+                Some(rest) => rest.split(" as ").next()?.to_string(),
+                None => caller.rsplit_once("::")?.0.to_string(),
+            }
+        } else {
+            let module = scopes.get(caller).map(String::as_str).unwrap_or("");
+            match local_inits.get(&(caller.to_string(), recv.to_string()))? {
+                LocalHint::Typed(t) => resolve_type(t, module)?,
+                LocalHint::Returns(callee) => {
+                    let fk = if declared.contains(callee) {
+                        callee.clone()
+                    } else if callee.contains("::") {
+                        [callee.clone(), format!("{module}::{callee}")]
+                            .into_iter()
+                            .find_map(|c| follow_reexports(&c, &aliases, &declared))?
+                    } else {
+                        fns.get(callee.as_str())
+                            .and_then(|cands| pick_in_scope(module, cands, &scopes))?
+                            .clone()
+                    };
+                    let ret = returns_map.get(&fk)?;
+                    let fmodule = scopes.get(&fk).map(String::as_str).unwrap_or("");
+                    resolve_type(ret, fmodule)?
+                }
+            }
+        };
+        let mk = format!("{ty}::{}", call.name);
+        declared
+            .contains(&mk)
+            .then_some((mk, if recv == "self" { "self" } else { "receiver" }))
+    };
+
     for (caller, file, call) in pending {
         let written = call.path.clone().unwrap_or_else(|| call.name.clone());
-        // A path written out in full names its target exactly, which beats
-        // matching on a last segment two functions may share.
-        if let Some(p) = &call.path
-            && declared.contains(p)
-        {
-            let mut e = edge_at(&caller, p, "CALLS", call.line);
-            stamp(&mut e, "path", "high", &written);
-            out.edges.push(e);
+        let emit = |out: &mut Assembled,
+                    emitted: &mut BTreeSet<(String, String)>,
+                    target: &str,
+                    strategy: &str,
+                    band: &str| {
+            if emitted.insert((caller.clone(), target.to_string())) {
+                let mut e = edge_at(&caller, target, "CALLS", call.line);
+                stamp(&mut e, strategy, band, &written);
+                out.edges.push(e);
+            }
+        };
+
+        if let Some(p) = &call.path {
+            // A path written out in full names its target exactly, which beats
+            // matching on a last segment two functions may share.
+            if declared.contains(p) {
+                emit(&mut out, &mut emitted, p, "path", "high");
+                continue;
+            }
+            if p.contains("::") {
+                // A qualified path is the whole claim: read it relative to the
+                // caller's module, follow re-exports, and when neither lands
+                // on a declaration the callee is external. The last segment is
+                // deliberately NOT matched against local names — that fallback
+                // is what once bound `store::remove(…)` to a same-named local
+                // method as a false self-edge.
+                let module = scopes.get(&caller).cloned().unwrap_or_default();
+                match [p.clone(), format!("{module}::{p}")]
+                    .into_iter()
+                    .find_map(|c| follow_reexports(&c, &aliases, &declared))
+                {
+                    Some(target) => emit(&mut out, &mut emitted, &target, "path", "high"),
+                    // Nothing here defines it: `std::fs::read`, or a
+                    // dependency's. We do not read that code and have no
+                    // signature for it, so the node is the path and the fact
+                    // that it was called — which is what "this crate uses
+                    // that" needs.
+                    None => {
+                        note_external(&mut external, p, Some("Function"));
+                        emit(&mut out, &mut emitted, p, "external-path", "high");
+                        external_calls += 1;
+                    }
+                }
+                continue;
+            }
+            // A bare name: the innermost scope holding exactly one candidate.
+            match fns.get(&call.name) {
+                Some(cands) => match pick(&caller, cands, &scopes) {
+                    Some(one) => {
+                        let one = one.clone();
+                        emit(&mut out, &mut emitted, &one, "scope", "medium");
+                    }
+                    // Defined here under this name, but more than one
+                    // candidate is equally close — a guess would be worse
+                    // than a gap.
+                    None => {
+                        ambiguous += 1;
+                        unresolved_edge(
+                            &mut unresolved_nodes,
+                            &mut out.edges,
+                            &mut emitted,
+                            &caller,
+                            &file,
+                            &call,
+                            format!("ambiguous: {} candidates", cands.len()),
+                        );
+                    }
+                },
+                // Nothing declares the name: a prelude or glob-imported
+                // function, external and keyed by all we have — the name.
+                None => {
+                    note_external(&mut external, p, Some("Function"));
+                    emit(&mut out, &mut emitted, p, "external-path", "high");
+                    external_calls += 1;
+                }
+            }
             continue;
         }
 
-        if let Some(cands) = fns.get(&call.name) {
-            match pick(&caller, cands, &scopes) {
-                Some(one) => {
-                    let one = one.clone();
-                    let mut e = edge_at(&caller, &one, "CALLS", call.line);
-                    stamp(&mut e, "scope", "medium", &written);
-                    out.edges.push(e);
-                    continue;
-                }
-                // Defined here under this name, but more than one candidate is
-                // equally close — a guess would be worse than a gap.
-                None => {
-                    ambiguous += 1;
-                    unresolved_edge(
-                        &mut unresolved_nodes,
-                        &mut out.edges,
-                        &caller,
-                        &file,
-                        &call,
-                        format!("ambiguous: {} candidates", cands.len()),
-                    );
-                    continue;
-                }
-            }
+        // A method call writes only `.read()`. When the body states the
+        // receiver's type it resolves; otherwise it is counted, never
+        // guessed — but shown, as an UnresolvedRef the graph can answer for.
+        if let Some((target, strategy)) = typed_target(&caller, &call) {
+            emit(&mut out, &mut emitted, &target, strategy, "high");
+            continue;
         }
-
-        match &call.path {
-            // Nothing here defines it and the call site wrote a path: it is
-            // `std::fs::read`, or a dependency's. We do not read its code and
-            // have no signature for it, so the node is the path and the fact
-            // that it was called — which is what "this crate uses that" needs.
-            Some(p) => {
-                note_external(&mut external, p, Some("Function"));
-                let mut e = edge_at(&caller, p, "CALLS", call.line);
-                stamp(&mut e, "external-path", "high", &written);
-                out.edges.push(e);
-                external_calls += 1;
-            }
-            // A method call writes only `.read()`, and the receiver's type is
-            // exactly what a parser cannot know. Counted, never guessed —
-            // but shown, as an UnresolvedRef the graph can answer for.
-            None => {
-                unresolved += 1;
-                unresolved_edge(
-                    &mut unresolved_nodes,
-                    &mut out.edges,
-                    &caller,
-                    &file,
-                    &call,
-                    "method call: receiver type unknown".into(),
-                );
-            }
-        }
+        unresolved += 1;
+        unresolved_edge(
+            &mut unresolved_nodes,
+            &mut out.edges,
+            &mut emitted,
+            &caller,
+            &file,
+            &call,
+            "method call: receiver type unknown".into(),
+        );
     }
     out.nodes.extend(unresolved_nodes.into_values());
 
@@ -1894,6 +2133,15 @@ fn fn_facts(
 
 fn ty_of(ty: &syn::Type) -> String {
     tidy(&ty.to_token_stream().to_string())
+}
+
+/// A signature's return type when it is a plain path — what receiver typing
+/// can actually use. `-> Option<Txn>` and friends yield nothing.
+fn ret_path(sig: &syn::Signature) -> Option<String> {
+    match &sig.output {
+        syn::ReturnType::Type(_, ty) => plain_type_path(ty),
+        syn::ReturnType::Default => None,
+    }
 }
 
 fn path_of(path: &syn::Path) -> String {

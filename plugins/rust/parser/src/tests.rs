@@ -1427,7 +1427,6 @@ fn has_edge(a: &Assembled, src: &str, ty: &str, dst: &str) -> bool {
 /// while a same-module METHOD shares the simple name. The call must bind to
 /// the free function — or to nothing — never to the method.
 #[test]
-#[ignore = "P3: qualified calls fall back to simple-name scope-picking"]
 fn qualified_call_through_reexport_never_binds_to_local_method() {
     let t = Tree::new("p0-qualified");
     t.write(
@@ -1464,7 +1463,6 @@ fn qualified_call_through_reexport_never_binds_to_local_method() {
 /// (`let mut txn = open();` → `Txn`), calling a method from a module where
 /// the simple name is NOT unique in scope. Requires receiver typing.
 #[test]
-#[ignore = "P3: no receiver typing — method calls resolve only by same-name-in-scope accident"]
 fn receiver_type_from_initializer_return_resolves_method_calls() {
     let t = Tree::new("p0-receiver");
     t.write(
