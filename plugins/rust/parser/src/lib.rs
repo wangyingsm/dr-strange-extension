@@ -139,9 +139,9 @@ pub struct FileFacts {
     path: String,
     /// `(caller key, what it called)`, resolved once every file is known.
     calls: Vec<(String, Call)>,
-    /// `(function key, declared return type)` for every free function whose
-    /// return is a plain path — what types a `let x = f();` receiver.
-    returns: Vec<(String, String)>,
+    /// `(function key, declared return shape)` for every free function whose
+    /// return names a usable type — what types a `let x = f();` receiver.
+    returns: Vec<(String, RetShape)>,
     /// `(caller key, local name, how its type is known)` — the bindings whose
     /// type a parser *can* know, kept for method-call resolution.
     local_hints: Vec<(String, String, LocalHint)>,
@@ -222,9 +222,28 @@ impl Ord for Call {
 #[derive(Clone, Serialize, Deserialize)]
 enum LocalHint {
     /// `let x = f(…);` — x's type is whatever `f` declares it returns.
-    Returns(String),
+    /// `unwrapped` records a `?`/`.unwrap()`/`.expect(…)` at the site, which
+    /// is what licenses peeling a `Result<T>`/`Option<T>` return to its `T`.
+    Returns { callee: String, unwrapped: bool },
+    /// `let x = y.m(…);` — typing x means typing `y` first, then reading
+    /// what `m` on y's type declares it returns.
+    MethodReturns {
+        recv: String,
+        method: String,
+        unwrapped: bool,
+    },
     /// `let x: T = …;` — the annotation, as written.
     Typed(String),
+}
+
+/// A declared return type, as far as receiver typing can use it.
+#[derive(Clone, Serialize, Deserialize)]
+enum RetShape {
+    /// `-> T` for a plain path type.
+    Plain(String),
+    /// `-> Result<T, …>` / `-> Option<T>` — the `T`, reachable only through
+    /// an unwrapping call site.
+    Wrapped(String),
 }
 
 fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> FileFacts {
@@ -409,10 +428,13 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                 f.edges
                     .push(edge_at(parent, &key, "CONTAINS", line_of(&func.sig.ident)));
                 collect_calls(&key, &func.block, f);
-                if let Some(ret) = ret_path(&func.sig) {
+                if let Some(ret) = ret_shape(&func.sig) {
                     f.returns.push((key.clone(), ret));
                 }
-                for (ident, hint) in local_hints(&func.block) {
+                for (ident, hint) in local_hints(&func.block)
+                    .into_iter()
+                    .chain(param_hints(&func.sig))
+                {
                     f.local_hints.push((key.clone(), ident, hint));
                 }
             }
@@ -632,8 +654,11 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                     label: label.to_string(),
                     props,
                     calls: call_names(&m.block),
-                    ret: ret_path(&m.sig),
-                    locals: local_hints(&m.block),
+                    ret: ret_shape(&m.sig),
+                    locals: local_hints(&m.block)
+                        .into_iter()
+                        .chain(param_hints(&m.sig))
+                        .collect(),
                     line: line_of(&m.sig.ident),
                 })
             }
@@ -676,9 +701,9 @@ struct ImplMethod {
     label: String,
     props: Props,
     calls: BTreeSet<Call>,
-    /// Declared return type when it is a plain path; `Self` is resolved to
-    /// the impl's type at assemble, where the type's key is known.
-    ret: Option<String>,
+    /// Declared return shape when usable; `Self` is resolved to the impl's
+    /// type at assemble, where the type's key is known.
+    ret: Option<RetShape>,
     /// The body's type-known locals, for its method calls.
     locals: Vec<(String, LocalHint)>,
 }
@@ -743,15 +768,11 @@ fn local_hints(block: &syn::Block) -> Vec<(String, LocalHint)> {
                     }
                     _ => None,
                 },
-                syn::Pat::Ident(i) => node.init.as_ref().and_then(|init| {
-                    if let syn::Expr::Call(c) = &*init.expr
-                        && let syn::Expr::Path(p) = &*c.func
-                    {
-                        Some((i.ident.to_string(), LocalHint::Returns(path_of(&p.path))))
-                    } else {
-                        None
-                    }
-                }),
+                syn::Pat::Ident(i) => node
+                    .init
+                    .as_ref()
+                    .and_then(|init| init_hint(&init.expr, false))
+                    .map(|hint| (i.ident.to_string(), hint)),
                 _ => None,
             };
             if let Some((ident, hint)) = hinted
@@ -767,18 +788,85 @@ fn local_hints(block: &syn::Block) -> Vec<(String, LocalHint)> {
     out
 }
 
-/// A type that *is* a path — `Txn`, `db::Txn`, `&mut Txn` — or nothing.
+/// What an initializer expression says about the type of the local it binds.
 ///
-/// Generic arguments disqualify: the receiver in `let x = f()` where `f`
-/// returns `Option<Txn>` is an `Option`, and its methods are std's, not
-/// `Txn`'s. References are looked through, since method resolution does.
+/// Only calls whose target is written down count: a plain call names a
+/// function whose declared return is on record, a method call defers to the
+/// receiver's type. `?`, `.unwrap()` and `.expect(…)` are looked through and
+/// remembered — they are what licenses peeling a wrapped return.
+fn init_hint(e: &syn::Expr, unwrapped: bool) -> Option<LocalHint> {
+    match e {
+        syn::Expr::Try(t) => init_hint(&t.expr, true),
+        syn::Expr::MethodCall(m) if m.method == "unwrap" || m.method == "expect" => {
+            init_hint(&m.receiver, true)
+        }
+        syn::Expr::Call(c) => match &*c.func {
+            syn::Expr::Path(p) => Some(LocalHint::Returns {
+                callee: path_of(&p.path),
+                unwrapped,
+            }),
+            _ => None,
+        },
+        syn::Expr::MethodCall(m) => match &*m.receiver {
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                Some(LocalHint::MethodReturns {
+                    recv: p.path.segments[0].ident.to_string(),
+                    method: m.method.to_string(),
+                    unwrapped,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A signature's parameters as type-known locals: the annotation is written
+/// in the signature, which is as declared as typing gets. Body bindings are
+/// consumed first, so a shadowing `let` beats its parameter.
+fn param_hints(sig: &syn::Signature) -> Vec<(String, LocalHint)> {
+    sig.inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::FnArg::Typed(t) => match (&*t.pat, plain_type_path(&t.ty)) {
+                (syn::Pat::Ident(i), Some(ty)) => {
+                    Some((i.ident.to_string(), LocalHint::Typed(ty)))
+                }
+                _ => None,
+            },
+            syn::FnArg::Receiver(_) => None,
+        })
+        .collect()
+}
+
+/// A type that *is* a path — `Txn`, `db::Txn`, `&mut Txn<'a>` — or nothing.
+///
+/// Lifetime arguments are dropped: they never change which type it is. Type
+/// arguments disqualify — `Option<Txn>` is an `Option`, and its methods are
+/// std's, not `Txn`'s. References are looked through, as method resolution
+/// does.
 fn plain_type_path(ty: &syn::Type) -> Option<String> {
+    fn lifetimes_only(seg: &syn::PathSegment) -> bool {
+        match &seg.arguments {
+            syn::PathArguments::None => true,
+            syn::PathArguments::AngleBracketed(a) => a
+                .args
+                .iter()
+                .all(|g| matches!(g, syn::GenericArgument::Lifetime(_))),
+            syn::PathArguments::Parenthesized(_) => false,
+        }
+    }
     match ty {
         syn::Type::Reference(r) => plain_type_path(&r.elem),
-        syn::Type::Path(p)
-            if p.qself.is_none() && p.path.segments.iter().all(|s| s.arguments.is_none()) =>
-        {
-            Some(path_of(&p.path))
+        syn::Type::Path(p) if p.qself.is_none() && p.path.segments.iter().all(lifetimes_only) => {
+            Some(
+                p.path
+                    .segments
+                    .iter()
+                    .map(|s| s.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::"),
+            )
         }
         _ => None,
     }
@@ -918,10 +1006,10 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // list the parse put on the node.
     let mut import_targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut macro_invocations = 0usize;
-    // Receiver typing (P3): every function's declared return type, and every
-    // body's type-known locals — both expanded through the writing file's
+    // Receiver typing (P3): every function's declared return shape, and every
+    // body's type-known locals — paths expanded through the writing file's
     // imports here, while that file is still in hand.
-    let mut returns_map: BTreeMap<String, String> = BTreeMap::new();
+    let mut returns_map: BTreeMap<String, RetShape> = BTreeMap::new();
     let mut local_inits: BTreeMap<(String, String), LocalHint> = BTreeMap::new();
 
     let aliases = build_aliases(&files, &declared);
@@ -930,12 +1018,20 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         let imports = import_index(&f.imports);
 
         for (key, ret) in &f.returns {
-            returns_map.insert(key.clone(), expand_path(ret, &imports, &f.module));
+            let expanded = match ret {
+                RetShape::Plain(t) => RetShape::Plain(expand_path(t, &imports, &f.module)),
+                RetShape::Wrapped(t) => RetShape::Wrapped(expand_path(t, &imports, &f.module)),
+            };
+            returns_map.insert(key.clone(), expanded);
         }
         for (caller, ident, hint) in &f.local_hints {
             let expanded = match hint {
-                LocalHint::Returns(p) => LocalHint::Returns(expand_path(p, &imports, &f.module)),
+                LocalHint::Returns { callee, unwrapped } => LocalHint::Returns {
+                    callee: expand_path(callee, &imports, &f.module),
+                    unwrapped: *unwrapped,
+                },
                 LocalHint::Typed(t) => LocalHint::Typed(expand_path(t, &imports, &f.module)),
+                chained @ LocalHint::MethodReturns { .. } => chained.clone(),
             };
             local_inits
                 .entry((caller.clone(), ident.clone()))
@@ -1079,10 +1175,16 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     None => expand_path(p, &imports, &b.module),
                 };
                 if let Some(ret) = &m.ret {
-                    let expanded = if ret == "Self" {
-                        self_key.clone()
-                    } else {
-                        deself(ret)
+                    let self_or = |t: &str| {
+                        if t == "Self" {
+                            self_key.clone()
+                        } else {
+                            deself(t)
+                        }
+                    };
+                    let expanded = match ret {
+                        RetShape::Plain(t) => RetShape::Plain(self_or(t)),
+                        RetShape::Wrapped(t) => RetShape::Wrapped(self_or(t)),
                     };
                     returns_map.insert(mkey.clone(), expanded);
                 }
@@ -1090,7 +1192,11 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     let expanded = match hint {
                         LocalHint::Typed(t) if t == "Self" => LocalHint::Typed(self_key.clone()),
                         LocalHint::Typed(t) => LocalHint::Typed(deself(t)),
-                        LocalHint::Returns(p) => LocalHint::Returns(deself(p)),
+                        LocalHint::Returns { callee, unwrapped } => LocalHint::Returns {
+                            callee: deself(callee),
+                            unwrapped: *unwrapped,
+                        },
+                        chained @ LocalHint::MethodReturns { .. } => chained.clone(),
                     };
                     local_inits
                         .entry((mkey.clone(), ident.clone()))
@@ -1199,52 +1305,26 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     };
 
     // Deterministic receiver typing (P3). `self.m()` is the impl's own type;
-    // `x.m()` types x through its annotation or its initializer's declared
-    // return. Every step reads something the source wrote — a miss at any of
-    // them falls to the ledger, never to a guess.
+    // `x.m()` types x through its annotation or its initializer — a call
+    // whose declared return is on record, or a method chain through locals
+    // already typed the same way, `?`/`.unwrap()` peeling a `Result`/`Option`
+    // along the way. Every step reads something the source wrote — a miss at
+    // any of them falls to the ledger, never to a guess.
+    let typing = Typing {
+        declared: &declared,
+        fns: &fns,
+        types: &types,
+        scopes: &scopes,
+        aliases: &aliases,
+        returns_map: &returns_map,
+        local_inits: &local_inits,
+    };
     let typed_target = |caller: &str, call: &Call| -> Option<(String, &'static str)> {
         let recv = call.recv.as_deref()?;
-        let resolve_type = |written: &str, module: &str| -> Option<String> {
-            if declared.contains(written) {
-                return Some(written.to_string());
-            }
-            if written.contains("::") {
-                return [written.to_string(), format!("{module}::{written}")]
-                    .into_iter()
-                    .find_map(|c| follow_reexports(&c, &aliases, &declared));
-            }
-            types
-                .get(written)
-                .and_then(|cands| pick_in_scope(module, cands, &scopes))
-                .cloned()
-        };
         let ty = if recv == "self" {
-            // `<Type as Trait>::m` and `path::Type::m` both name their type.
-            match caller.strip_prefix('<') {
-                Some(rest) => rest.split(" as ").next()?.to_string(),
-                None => caller.rsplit_once("::")?.0.to_string(),
-            }
+            owner_of(caller)?
         } else {
-            let module = scopes.get(caller).map(String::as_str).unwrap_or("");
-            match local_inits.get(&(caller.to_string(), recv.to_string()))? {
-                LocalHint::Typed(t) => resolve_type(t, module)?,
-                LocalHint::Returns(callee) => {
-                    let fk = if declared.contains(callee) {
-                        callee.clone()
-                    } else if callee.contains("::") {
-                        [callee.clone(), format!("{module}::{callee}")]
-                            .into_iter()
-                            .find_map(|c| follow_reexports(&c, &aliases, &declared))?
-                    } else {
-                        fns.get(callee.as_str())
-                            .and_then(|cands| pick_in_scope(module, cands, &scopes))?
-                            .clone()
-                    };
-                    let ret = returns_map.get(&fk)?;
-                    let fmodule = scopes.get(&fk).map(String::as_str).unwrap_or("");
-                    resolve_type(ret, fmodule)?
-                }
-            }
+            typing.local_type(caller, recv, 8)?
         };
         let mk = format!("{ty}::{}", call.name);
         declared
@@ -1281,10 +1361,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 // is what once bound `store::remove(…)` to a same-named local
                 // method as a false self-edge.
                 let module = scopes.get(&caller).cloned().unwrap_or_default();
-                match [p.clone(), format!("{module}::{p}")]
-                    .into_iter()
-                    .find_map(|c| follow_reexports(&c, &aliases, &declared))
-                {
+                match resolve_relative(p, &module, &aliases, &declared) {
                     Some(target) => emit(&mut out, &mut emitted, &target, "path", "high"),
                     // Nothing here defines it: `std::fs::read`, or a
                     // dependency's. We do not read that code and have no
@@ -1569,6 +1646,127 @@ fn resolve(
     let key = expand_path(name, imports, module);
     note_external(external, &key, Some(external_label));
     key
+}
+
+/// The declared key a written path names when read from `module`: the path
+/// itself, then prefixed with `module` and each of its ancestors — innermost
+/// first, the way scope narrowing reads — each probe followed through
+/// re-exports. The ancestor walk is what makes `Database::in_memory()` under
+/// a `use super::*` glob resolve: the glob puts the parent's names in scope,
+/// and every segment of the written path still has to match a declared key,
+/// so this stays a path match, never a bare-name guess.
+fn resolve_relative(
+    path: &str,
+    module: &str,
+    aliases: &BTreeMap<String, String>,
+    declared: &BTreeSet<String>,
+) -> Option<String> {
+    if let Some(hit) = follow_reexports(path, aliases, declared) {
+        return Some(hit);
+    }
+    let mut scope = module;
+    loop {
+        if let Some(hit) = follow_reexports(&format!("{scope}::{path}"), aliases, declared) {
+            return Some(hit);
+        }
+        match scope.rsplit_once("::") {
+            Some((parent, _)) => scope = parent,
+            None => return None,
+        }
+    }
+}
+
+/// The type an impl-method key belongs to: `<Type as Trait>::m` and
+/// `path::Type::m` both name it.
+fn owner_of(key: &str) -> Option<String> {
+    match key.strip_prefix('<') {
+        Some(rest) => rest.split(" as ").next().map(str::to_string),
+        None => key.rsplit_once("::").map(|(o, _)| o.to_string()),
+    }
+}
+
+/// Everything receiver typing reads, together so it can recurse: typing
+/// `txn` in `let txn = plane.write().unwrap()` means typing `plane` first.
+struct Typing<'a> {
+    declared: &'a BTreeSet<String>,
+    fns: &'a BTreeMap<String, Vec<String>>,
+    types: &'a BTreeMap<String, Vec<String>>,
+    scopes: &'a BTreeMap<String, String>,
+    aliases: &'a BTreeMap<String, String>,
+    returns_map: &'a BTreeMap<String, RetShape>,
+    local_inits: &'a BTreeMap<(String, String), LocalHint>,
+}
+
+impl Typing<'_> {
+    /// The declared key a written type resolves to, or nothing.
+    fn type_key(&self, written: &str, module: &str) -> Option<String> {
+        if self.declared.contains(written) {
+            return Some(written.to_string());
+        }
+        if written.contains("::") {
+            return resolve_relative(written, module, self.aliases, self.declared);
+        }
+        self.types
+            .get(written)
+            .and_then(|cands| pick_in_scope(module, cands, self.scopes))
+            .cloned()
+    }
+
+    /// A callable's declared return, peeled only when the site unwrapped it,
+    /// resolved in the callable's own module.
+    fn returned_type(&self, callable: &str, unwrapped: bool) -> Option<String> {
+        let written = match (self.returns_map.get(callable)?, unwrapped) {
+            (RetShape::Plain(t), false) => t,
+            (RetShape::Wrapped(t), true) => t,
+            // A `Result` nobody unwrapped is a `Result`; an `unwrap()` on a
+            // plain type is std's business — neither types the local.
+            _ => return None,
+        };
+        let module = self.scopes.get(callable).map(String::as_str).unwrap_or("");
+        self.type_key(written, module)
+    }
+
+    /// The resolved type of a body's local, through its annotation or its
+    /// initializer, chaining through other locals up to `depth` hops.
+    fn local_type(&self, caller: &str, ident: &str, depth: usize) -> Option<String> {
+        if depth == 0 {
+            return None;
+        }
+        let module = self.scopes.get(caller).map(String::as_str).unwrap_or("");
+        match self
+            .local_inits
+            .get(&(caller.to_string(), ident.to_string()))?
+        {
+            LocalHint::Typed(t) => self.type_key(t, module),
+            LocalHint::Returns { callee, unwrapped } => {
+                let fk = if self.declared.contains(callee) {
+                    callee.clone()
+                } else if callee.contains("::") {
+                    resolve_relative(callee, module, self.aliases, self.declared)?
+                } else {
+                    self.fns
+                        .get(callee.as_str())
+                        .and_then(|cands| pick_in_scope(module, cands, self.scopes))?
+                        .clone()
+                };
+                self.returned_type(&fk, *unwrapped)
+            }
+            LocalHint::MethodReturns {
+                recv,
+                method,
+                unwrapped,
+            } => {
+                let rty = if recv == "self" {
+                    owner_of(caller)?
+                } else {
+                    self.local_type(caller, recv, depth - 1)?
+                };
+                let mk = format!("{rty}::{method}");
+                self.declared.contains(&mk).then_some(())?;
+                self.returned_type(&mk, *unwrapped)
+            }
+        }
+    }
 }
 
 /// Choose among same-named functions by locality.
@@ -2135,13 +2333,29 @@ fn ty_of(ty: &syn::Type) -> String {
     tidy(&ty.to_token_stream().to_string())
 }
 
-/// A signature's return type when it is a plain path — what receiver typing
-/// can actually use. `-> Option<Txn>` and friends yield nothing.
-fn ret_path(sig: &syn::Signature) -> Option<String> {
-    match &sig.output {
-        syn::ReturnType::Type(_, ty) => plain_type_path(ty),
-        syn::ReturnType::Default => None,
+/// A signature's return type as receiver typing can use it: a plain path, or
+/// the `T` inside `Result<T, …>`/`Option<T>` — which an unwrapping call site
+/// reaches. Anything else yields nothing.
+fn ret_shape(sig: &syn::Signature) -> Option<RetShape> {
+    let syn::ReturnType::Type(_, ty) = &sig.output else {
+        return None;
+    };
+    if let Some(plain) = plain_type_path(ty) {
+        return Some(RetShape::Plain(plain));
     }
+    // `Result` / `Option` by last-segment ident: `anyhow::Result<T>` and a
+    // crate's own `Result<T>` alias both count — what matters is that `?`
+    // and `.unwrap()` reach the `T`.
+    if let syn::Type::Path(p) = &**ty
+        && p.qself.is_none()
+        && let Some(last) = p.path.segments.last()
+        && (last.ident == "Result" || last.ident == "Option")
+        && let syn::PathArguments::AngleBracketed(a) = &last.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = a.args.first()
+    {
+        return plain_type_path(inner).map(RetShape::Wrapped);
+    }
+    None
 }
 
 fn path_of(path: &syn::Path) -> String {

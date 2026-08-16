@@ -1495,3 +1495,47 @@ fn receiver_type_from_initializer_return_resolves_method_calls() {
         "and never the same-named method on an unrelated type"
     );
 }
+
+/// The shape integration tests actually write: a chain of locals, each typed
+/// by the previous one's declared return, with `?` and `.unwrap()` peeling
+/// `Result` along the way — `open()?` → `db.plane()` → `.write().unwrap()`.
+#[test]
+fn receiver_chain_through_wrapped_returns_resolves_method_calls() {
+    let t = Tree::new("p3-chain");
+    t.write(
+        "Cargo.toml",
+        "[package]\nname = \"k\"\nversion = \"0.0.0\"\n",
+    );
+    t.write("src/lib.rs", "pub mod db;\npub mod caller;\n");
+    t.write(
+        "src/db.rs",
+        concat!(
+            "pub struct Db;\npub struct Plane;\npub struct Txn;\n",
+            "pub fn open() -> Result<Db, ()> { Ok(Db) }\n",
+            "impl Db {\n    pub fn plane(&self) -> Plane { Plane }\n}\n",
+            "impl Plane {\n    pub fn write(&self) -> Result<Txn, ()> { Ok(Txn) }\n}\n",
+            "impl Txn {\n    pub fn remove(&mut self, _: u64) {}\n}\n",
+        ),
+    );
+    t.write(
+        "src/caller.rs",
+        concat!(
+            "use crate::db::open;\n",
+            "pub fn go() -> Result<(), ()> {\n",
+            "    let db = open()?;\n",
+            "    let plane = db.plane();\n",
+            "    let mut txn = plane.write().unwrap();\n",
+            "    txn.remove(7);\n    Ok(())\n}\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::caller::go", "CALLS", "k::db::Txn::remove"),
+        "each hop of the chain is a declared fact: {:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
