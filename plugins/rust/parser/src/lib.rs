@@ -133,6 +133,10 @@ pub struct FileFacts {
     pub edges: Vec<Edge>,
     /// This file's own module path, which resolution is relative to.
     module: String,
+    /// The source path as the host handed it — what UnresolvedRef nodes are
+    /// attributed to, so an incremental fold can delete and re-create them
+    /// with their file.
+    path: String,
     /// `(caller key, what it called)`, resolved once every file is known.
     calls: Vec<(String, Call)>,
     /// `impl` blocks, held whole until every file is known — see [`walk_impl`].
@@ -235,6 +239,7 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
         .collect();
     f.reexports = reexports;
     f.module = module.to_string();
+    f.path = source_path(path);
     walk_items(&ast.items, module, include_source, &mut f);
     // Every node above came from this file; the file-level module already
     // says so under `path`, everything else says it here.
@@ -807,7 +812,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut external: BTreeMap<String, Node> = BTreeMap::new();
     let mut impl_nodes: Vec<Node> = Vec::new();
     let mut impl_edges: Vec<Edge> = Vec::new();
-    let mut impl_calls: Vec<(String, Call)> = Vec::new();
+    let mut impl_calls: Vec<(String, String, Call)> = Vec::new();
     // module key -> what its `use` lines resolved to, replacing the as-written
     // list the parse put on the node.
     let mut import_targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -951,6 +956,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                         .map(|p| expand_path(p, &imports, &b.module));
                     (
                         mkey.clone(),
+                        f.path.clone(),
                         Call {
                             path,
                             name: c.name.clone(),
@@ -1001,37 +1007,78 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // Expand each written path while the file that wrote it is still known:
     // `fs::read()` means `std::fs::read` only to the file that said `use
     // std::fs`. Impl methods arrive already expanded, for the same reason.
-    let mut pending: Vec<(String, Call)> = Vec::new();
+    let mut pending: Vec<(String, String, Call)> = Vec::new();
     for f in &mut files {
         let imports = import_index(&f.imports);
         let module = f.module.clone();
+        let file = f.path.clone();
         for (caller, c) in std::mem::take(&mut f.calls) {
             let path = c.path.as_deref().map(|p| expand_path(p, &imports, &module));
-            pending.push((caller, Call { path, ..c }));
+            pending.push((caller, file.clone(), Call { path, ..c }));
         }
     }
     pending.extend(impl_calls);
 
-    for (caller, call) in pending {
+    // The unresolved ledger (P1): what could not be resolved becomes a
+    // queryable UnresolvedRef node per (caller file, name) — attributed to
+    // the caller's file so an incremental fold owns it — with a CALLS edge
+    // per site carrying the reason. The report still counts; the graph now
+    // also *shows*, so an agent's context names its blind spots.
+    let mut unresolved_nodes: BTreeMap<String, Node> = BTreeMap::new();
+    let unresolved_edge = |nodes: &mut BTreeMap<String, Node>,
+                               edges: &mut Vec<Edge>,
+                               caller: &str,
+                               file: &str,
+                               call: &Call,
+                               reason: String| {
+        let key = format!("?::{file}::{}", call.name);
+        nodes.entry(key.clone()).or_insert_with(|| Node {
+            key: key.clone(),
+            label: "UnresolvedRef".into(),
+            extra_labels: Vec::new(),
+            props: props([("name", call.name.clone()), ("file", file.to_string())]),
+        });
+        let written = call.path.clone().unwrap_or_else(|| call.name.clone());
+        let mut e = edge_at(caller, &key, "CALLS", call.line);
+        stamp(&mut e, "unresolved", "none", &written);
+        e.props.insert("_reason".into(), Value::String(reason));
+        edges.push(e);
+    };
+
+    for (caller, file, call) in pending {
+        let written = call.path.clone().unwrap_or_else(|| call.name.clone());
         // A path written out in full names its target exactly, which beats
         // matching on a last segment two functions may share.
         if let Some(p) = &call.path
             && declared.contains(p)
         {
-            out.edges.push(edge_at(&caller, p, "CALLS", call.line));
+            let mut e = edge_at(&caller, p, "CALLS", call.line);
+            stamp(&mut e, "path", "high", &written);
+            out.edges.push(e);
             continue;
         }
 
         if let Some(cands) = fns.get(&call.name) {
             match pick(&caller, cands, &scopes) {
                 Some(one) => {
-                    out.edges.push(edge_at(&caller, one, "CALLS", call.line));
+                    let one = one.clone();
+                    let mut e = edge_at(&caller, &one, "CALLS", call.line);
+                    stamp(&mut e, "scope", "medium", &written);
+                    out.edges.push(e);
                     continue;
                 }
                 // Defined here under this name, but more than one candidate is
                 // equally close — a guess would be worse than a gap.
                 None => {
                     ambiguous += 1;
+                    unresolved_edge(
+                        &mut unresolved_nodes,
+                        &mut out.edges,
+                        &caller,
+                        &file,
+                        &call,
+                        format!("ambiguous: {} candidates", cands.len()),
+                    );
                     continue;
                 }
             }
@@ -1044,14 +1091,28 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             // that it was called — which is what "this crate uses that" needs.
             Some(p) => {
                 note_external(&mut external, p, Some("Function"));
-                out.edges.push(edge_at(&caller, p, "CALLS", call.line));
+                let mut e = edge_at(&caller, p, "CALLS", call.line);
+                stamp(&mut e, "external-path", "high", &written);
+                out.edges.push(e);
                 external_calls += 1;
             }
             // A method call writes only `.read()`, and the receiver's type is
-            // exactly what a parser cannot know. Counted, never guessed.
-            None => unresolved += 1,
+            // exactly what a parser cannot know. Counted, never guessed —
+            // but shown, as an UnresolvedRef the graph can answer for.
+            None => {
+                unresolved += 1;
+                unresolved_edge(
+                    &mut unresolved_nodes,
+                    &mut out.edges,
+                    &caller,
+                    &file,
+                    &call,
+                    "method call: receiver type unknown".into(),
+                );
+            }
         }
     }
+    out.nodes.extend(unresolved_nodes.into_values());
 
     // Last, because resolving calls is itself a source of external nodes: a
     // path into std is discovered at its call site, not before. Never written
@@ -1690,6 +1751,18 @@ fn line_of<T: syn::spanned::Spanned>(t: &T) -> u64 {
 }
 
 /// An edge carrying the line the relation is written on.
+/// Stamp a call edge with how it was resolved — the metadata both surveyed
+/// competitors carry and this parser did not: the strategy that won, a
+/// coarse confidence band, and the reference as written. `_`-prefixed, so
+/// the props are retrieval-only like all provenance.
+fn stamp(e: &mut Edge, strategy: &str, band: &str, written: &str) {
+    e.props
+        .insert("_resolved_by".into(), Value::String(strategy.into()));
+    e.props
+        .insert("_confidence".into(), Value::String(band.into()));
+    e.props.insert("_ref".into(), Value::String(written.into()));
+}
+
 fn edge_at(src: &str, dst: &str, ty: &str, line: u64) -> Edge {
     let mut e = edge(src, dst, ty);
     e.props.insert("line".into(), Value::from(line));

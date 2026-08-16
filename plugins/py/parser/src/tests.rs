@@ -290,7 +290,21 @@ fn member_calls_are_counted_and_builtins_skipped() {
         "def run(db):\n    db.query()\n    print(len([]))\n",
     )]));
     note_containing(&a, "left unresolved");
-    assert!(!a.edges.iter().any(|e| e.ty == "CALLS"));
+    // Counted — and now shown (P1): the receiver-typed call lands in the
+    // unresolved ledger as a real node with the reason on the edge, while
+    // the builtin still produces nothing at all.
+    let ledger = edge(&a, "CALLS", "?::m.py::db.query");
+    assert_eq!(
+        ledger.props.get("_resolved_by"),
+        Some(&Value::String("unresolved".into()))
+    );
+    assert!(node(&a, "?::m.py::db.query").label == "UnresolvedRef");
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "CALLS" && e.dst.contains("print")),
+        "builtins earn no ledger entry"
+    );
 }
 
 /// Bases are syntax: in-tree ones bind, foreign ones stand in as Classes,

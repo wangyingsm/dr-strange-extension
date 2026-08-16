@@ -409,8 +409,42 @@ fn a_call_into_another_crate_stops_at_a_node() {
     // Written `fs::read`, but the file said `use std::fs` — so it is recorded
     // under the path that identifies it, not the abbreviation.
     assert!(calls.contains(&"std::fs::read"), "{calls:?}");
-    // A method call names no path and the receiver's type is unknowable here.
-    assert!(!calls.iter().any(|c| c.contains("trim")), "{calls:?}");
+    // A method call names no path and the receiver's type is unknowable
+    // here — so it lands in the unresolved ledger: a real node, attributed
+    // to this file, with the reason on the edge (P1).
+    assert!(calls.contains(&"?::src/lib.rs::trim"), "{calls:?}");
+    let ledger = out
+        .nodes
+        .iter()
+        .find(|n| n.key == "?::src/lib.rs::trim")
+        .expect("UnresolvedRef node");
+    assert_eq!(ledger.label, "UnresolvedRef");
+    let trim_edge = out
+        .edges
+        .iter()
+        .find(|e| e.dst == "?::src/lib.rs::trim")
+        .unwrap();
+    assert_eq!(
+        trim_edge.props.get("_resolved_by"),
+        Some(&Value::String("unresolved".into()))
+    );
+    assert!(
+        matches!(trim_edge.props.get("_reason"), Some(Value::String(r)) if r.contains("receiver"))
+    );
+    // And the resolved edges carry their strategy stamps.
+    let read_edge = out
+        .edges
+        .iter()
+        .find(|e| e.dst == "std::fs::read" && e.src == "k::go")
+        .unwrap();
+    assert_eq!(
+        read_edge.props.get("_resolved_by"),
+        Some(&Value::String("external-path".into()))
+    );
+    assert_eq!(
+        read_edge.props.get("_ref"),
+        Some(&Value::String("std::fs::read".into()))
+    );
 
     // A call site proves the target is callable, so it is labelled as both what
     // it is and as foreign.

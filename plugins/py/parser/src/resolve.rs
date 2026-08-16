@@ -4,6 +4,7 @@
 //! on where the chunk boundaries fell.
 
 use crate::{CallKind, Edge, FileFacts, Node, Props, edge_at};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The assembled result: facts, and an account of what could not be done.
@@ -253,6 +254,11 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
 
     // ---- calls and bases ---------------------------------------------------
     let mut unresolved = 0usize;
+    // The unresolved ledger (P1): a queryable UnresolvedRef node per
+    // (file, written form), attributed to the caller's file for fold
+    // ownership; the reason rides the edge. Counted still — but shown.
+    let mut unresolved_nodes: std::collections::BTreeMap<String, Node> =
+        std::collections::BTreeMap::new();
     let mut external_calls = 0usize;
     for f in &all {
         let bindings: BTreeMap<&str, (&str, &str)> = f
@@ -374,14 +380,51 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     }
                 }
             };
+            let (written, strategy, band) = match &c.kind {
+                CallKind::Plain(name) => (name.clone(), "name", "medium"),
+                CallKind::Chain(parts) => (parts.join("."), "chain", "medium"),
+                CallKind::This { method, .. } => (format!("self.{method}"), "self-class", "high"),
+            };
             match resolved {
-                Some(Some(key)) => add_edge(
-                    &mut pending,
-                    &mut edge_set,
-                    edge_at(&c.caller, &key, "CALLS", c.line),
-                ),
+                Some(Some(key)) => {
+                    let mut e = edge_at(&c.caller, &key, "CALLS", c.line);
+                    e.props
+                        .insert("_resolved_by".into(), Value::String(strategy.into()));
+                    e.props
+                        .insert("_confidence".into(), Value::String(band.into()));
+                    e.props
+                        .insert("_ref".into(), Value::String(written.clone()));
+                    add_edge(&mut pending, &mut edge_set, e);
+                }
                 Some(None) => {}
-                None => unresolved += 1,
+                None => {
+                    unresolved += 1;
+                    let key = format!("?::{}::{written}", f.file);
+                    unresolved_nodes.entry(key.clone()).or_insert_with(|| Node {
+                        key: key.clone(),
+                        label: "UnresolvedRef".into(),
+                        extra_labels: Vec::new(),
+                        props: {
+                            let mut p = Props::new();
+                            p.insert("name".into(), Value::String(written.clone()));
+                            p.insert("file".into(), Value::String(f.file.clone()));
+                            p
+                        },
+                    });
+                    let mut e = edge_at(&c.caller, &key, "CALLS", c.line);
+                    e.props
+                        .insert("_resolved_by".into(), Value::String("unresolved".into()));
+                    e.props
+                        .insert("_confidence".into(), Value::String("none".into()));
+                    e.props.insert("_ref".into(), Value::String(written));
+                    e.props.insert(
+                        "_reason".into(),
+                        Value::String(
+                            "name or receiver not resolvable from imports or scope".into(),
+                        ),
+                    );
+                    add_edge(&mut pending, &mut edge_set, e);
+                }
             }
         }
 
@@ -411,6 +454,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    out.nodes.extend(unresolved_nodes.into_values());
     out.edges = pending;
 
     // ---- implied and external nodes --------------------------------------
