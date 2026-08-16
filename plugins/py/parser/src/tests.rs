@@ -513,3 +513,17 @@ fn string_names_of_known_symbols_become_references() {
         "a string naming a known symbol is an impact fact"
     );
 }
+
+/// The ledger key is an edge target; the implied-node pass must not mint a
+/// second, bare node for it (the duplicate-key regression the hermes digest
+/// surfaced).
+#[test]
+fn an_unresolved_ref_is_one_node_not_two() {
+    let a = run(&tree(vec![("m.py", "def go(db):\n    db.query(1)\n")]));
+    let hits = a
+        .nodes
+        .iter()
+        .filter(|n| n.key == "?::m.py::db.query")
+        .count();
+    assert_eq!(hits, 1, "one UnresolvedRef, no implied double");
+}

@@ -471,6 +471,9 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // Into `seen` as well: a ledger key is an edge target, and the implied-
+    // node pass below would otherwise mint a second, bare node for it.
+    seen.extend(unresolved_nodes.keys().cloned());
     out.nodes.extend(unresolved_nodes.into_values());
     out.edges = pending;
 
