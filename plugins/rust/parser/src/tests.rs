@@ -1378,3 +1378,88 @@ fn impl_methods_carry_their_file_like_everything_else() {
         );
     }
 }
+
+fn has_edge(a: &Assembled, src: &str, ty: &str, dst: &str) -> bool {
+    a.edges
+        .iter()
+        .any(|e| e.src == src && e.ty == ty && e.dst == dst)
+}
+
+// ---- P0 eval harness: known resolution gaps, un-ignored as their phase
+// lands. `just eval` runs these; CI's normal `cargo test` skips them.
+
+/// The benchmark's false self-edge, as a fixture: a path-qualified call
+/// (`node::remove(...)`) to a free function behind a `pub use` re-export,
+/// while a same-module METHOD shares the simple name. The call must bind to
+/// the free function — or to nothing — never to the method.
+#[test]
+#[ignore = "P3: qualified calls fall back to simple-name scope-picking"]
+fn qualified_call_through_reexport_never_binds_to_local_method() {
+    let t = Tree::new("p0-qualified");
+    t.write(
+        "Cargo.toml",
+        "[package]\nname = \"k\"\nversion = \"0.0.0\"\n",
+    );
+    t.write("src/lib.rs", "pub mod store;\npub mod api;\n");
+    t.write(
+        "src/store.rs",
+        "mod inner { pub fn remove(_: u64) {} }\npub use inner::remove;\n",
+    );
+    t.write(
+        "src/api.rs",
+        "use crate::store;\npub struct Txn;\nimpl Txn {\n    pub fn remove(&mut self, id: u64) {\n        store::remove(id)\n    }\n}\n",
+    );
+    let a = run(&t);
+    assert!(
+        !has_edge(&a, "k::api::Txn::remove", "CALLS", "k::api::Txn::remove"),
+        "a path-qualified call must never produce a self-edge to a same-named method"
+    );
+    assert!(
+        has_edge(
+            &a,
+            "k::api::Txn::remove",
+            "CALLS",
+            "k::store::inner::remove"
+        ),
+        "the qualifier names the re-exported free function"
+    );
+}
+
+/// The benchmark's missing integration-test callers, as a fixture: a
+/// receiver whose type comes from an initializer's declared return type
+/// (`let mut txn = open();` → `Txn`), calling a method from a module where
+/// the simple name is NOT unique in scope. Requires receiver typing.
+#[test]
+#[ignore = "P3: no receiver typing — method calls resolve only by same-name-in-scope accident"]
+fn receiver_type_from_initializer_return_resolves_method_calls() {
+    let t = Tree::new("p0-receiver");
+    t.write(
+        "Cargo.toml",
+        "[package]\nname = \"k\"\nversion = \"0.0.0\"\n",
+    );
+    t.write(
+        "src/lib.rs",
+        "pub mod db;\npub mod other;\npub mod caller;\n",
+    );
+    t.write(
+        "src/db.rs",
+        "pub struct Txn;\npub fn open() -> Txn { Txn }\nimpl Txn {\n    pub fn remove(&mut self, _: u64) {}\n}\n",
+    );
+    t.write(
+        "src/other.rs",
+        "pub struct Store;\nimpl Store {\n    pub fn remove(&mut self, _: u64) {}\n}\n",
+    );
+    t.write(
+        "src/caller.rs",
+        "use crate::db::open;\npub fn go() {\n    let mut txn = open();\n    txn.remove(7);\n}\n",
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::caller::go", "CALLS", "k::db::Txn::remove"),
+        "the initializer's return type names the receiver: open() -> Txn"
+    );
+    assert!(
+        !has_edge(&a, "k::caller::go", "CALLS", "k::other::Store::remove"),
+        "and never the same-named method on an unrelated type"
+    );
+}

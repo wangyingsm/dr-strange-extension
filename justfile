@@ -70,3 +70,10 @@ test:
     cd plugins/java/parser && cargo test
     cd plugins/c/parser && cargo test
     cd plugins/web/parser && cargo test
+
+# The P0 eval board: every known resolution gap as an ignored test, red
+# until its phase lands. Failing here is the expected state — this recipe
+# exists to watch the reds turn green, not to gate CI.
+eval:
+    -cd plugins/py/parser && cargo test -- --ignored
+    -cd plugins/rust/parser && cargo test -- --ignored
