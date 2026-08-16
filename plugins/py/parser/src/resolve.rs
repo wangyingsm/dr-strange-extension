@@ -454,6 +454,23 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // String references (P2): a literal that names a known symbol becomes a
+    // REFERENCES edge — never CALLS, never a ledger entry when it misses
+    // (most strings are not code).
+    for f in &all {
+        for (caller, text, line) in &f.string_refs {
+            if seen.contains(text) && seen.contains(caller) {
+                let mut e = edge_at(caller, text, "REFERENCES", *line);
+                e.props
+                    .insert("_resolved_by".into(), Value::String("string-name".into()));
+                e.props
+                    .insert("_confidence".into(), Value::String("high".into()));
+                e.props
+                    .insert("_ref".into(), Value::String((*text).clone()));
+                add_edge(&mut pending, &mut edge_set, e);
+            }
+        }
+    }
     out.nodes.extend(unresolved_nodes.into_values());
     out.edges = pending;
 

@@ -465,9 +465,9 @@ fn include_source_attaches_the_declaration() {
 /// every production caller of `resolve_anthropic_token` imports it inside the
 /// calling function. The import table must include function-scoped imports.
 #[test]
-#[ignore = "P2: function-scoped imports never enter the import table"]
 fn function_scoped_imports_resolve_calls() {
     let a = run(&tree(vec![
+        ("pkg/__init__.py", ""),
         ("pkg/util.py", "def fmt(x):\n    return x\n"),
         (
             "main.py",
@@ -483,9 +483,9 @@ fn function_scoped_imports_resolve_calls() {
 /// The `import x` (non-from) flavor of the same gap, plus attribute calls
 /// through it.
 #[test]
-#[ignore = "P2: function-scoped imports never enter the import table"]
 fn function_scoped_module_import_resolves_attribute_calls() {
     let a = run(&tree(vec![
+        ("pkg/__init__.py", ""),
         ("pkg/util.py", "def fmt(x):\n    return x\n"),
         (
             "main.py",
@@ -499,9 +499,9 @@ fn function_scoped_module_import_resolves_attribute_calls() {
 /// impact-relevant in the benchmark. A string literal that is exactly a
 /// known key's dotted form becomes a REFERENCES edge (never CALLS).
 #[test]
-#[ignore = "P2: string-name references are invisible"]
 fn string_names_of_known_symbols_become_references() {
     let a = run(&tree(vec![
+        ("pkg/__init__.py", ""),
         ("pkg/util.py", "def fmt(x):\n    return x\n"),
         (
             "test_util.py",

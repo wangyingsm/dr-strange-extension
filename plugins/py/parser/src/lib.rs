@@ -113,6 +113,11 @@ pub struct FileFacts {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub calls: Vec<Call>,
+    /// `(caller, dotted string literal, line)` — strings shaped like
+    /// qualified names (`"pkg.mod.fn"`), resolved at assemble into
+    /// REFERENCES edges when they name a known symbol. mock.patch targets
+    /// are the canonical case.
+    pub string_refs: Vec<(String, String, u64)>,
     pub bindings: Vec<ImportBinding>,
     /// Import statements as written (absolute dotted targets), with lines.
     pub imports: Vec<(String, u64)>,
@@ -811,7 +816,10 @@ impl Walker<'_> {
             class: class.map(str::to_string),
         };
         for stmt in body {
-            ruff_python_ast::visitor::walk_stmt(&mut v, stmt);
+            // Through visit_stmt, not walk_stmt: the body's own top-level
+            // statements must hit the visitor too (function-scoped imports
+            // live exactly there).
+            ruff_python_ast::visitor::Visitor::visit_stmt(&mut v, stmt);
         }
     }
 
@@ -886,7 +894,43 @@ struct CallCollector<'a, 'b> {
 }
 
 impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
+    fn visit_stmt(&mut self, stmt: &ast::Stmt) {
+        // Function-scoped imports (P2): the lazy-import idiom binds names
+        // exactly as a top-level import does for resolution's purposes, so
+        // they join the same table — recorded here because this visitor is
+        // the only walker that enters bodies.
+        match stmt {
+            ast::Stmt::Import(i) => self.walker.import(i),
+            ast::Stmt::ImportFrom(i) => self.walker.import_from(i),
+            _ => {}
+        }
+        ruff_python_ast::visitor::walk_stmt(self, stmt);
+    }
+
     fn visit_expr(&mut self, expr: &ast::Expr) {
+        // A string literal shaped like a dotted qualified name is a
+        // candidate symbol reference (mock.patch("pkg.mod.fn")); it binds at
+        // assemble only if something actually declares that name (P2).
+        if let ast::Expr::StringLiteral(lit) = expr {
+            let text = lit.value.to_str();
+            if text.contains('.')
+                && text.split('.').all(|seg| {
+                    !seg.is_empty()
+                        && seg
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() || c == '_')
+                        && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+                })
+            {
+                let line = self.walker.line(lit.range());
+                let caller = self.caller.clone();
+                self.walker
+                    .facts
+                    .string_refs
+                    .push((caller, text.to_string(), line));
+            }
+        }
         if let ast::Expr::Call(call) = expr {
             let line = self.walker.line(call.range());
             match &*call.func {
