@@ -52,13 +52,15 @@ jobs:
             plugins/java/parser
             plugins/c/parser
             plugins/web/parser
+            plugins/toml
       # Standalone crates, deliberately (each ships at its own pace), so the
       # gate loops rather than relying on a workspace.
       - name: Gates
         run: |
           for dir in sdk/rust \
                      plugins/rust/parser plugins/ts/parser plugins/py/parser \
-                     plugins/java/parser plugins/c/parser plugins/web/parser; do
+                     plugins/java/parser plugins/c/parser plugins/web/parser \
+                     plugins/toml; do
             echo "::group::$dir"
             (cd "$dir" && cargo fmt --check && cargo clippy --all-targets && cargo test)
             echo "::endgroup::"
