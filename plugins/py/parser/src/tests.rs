@@ -655,3 +655,26 @@ fn receiver_resolutions_are_stamped() {
         Some("receiver")
     );
 }
+
+/// C4 (narrow): a bare in-tree function — or class, the class-as-value
+/// idiom — passed as a call argument is a REFERENCES fact; no self-loops.
+#[test]
+fn functions_passed_as_values_become_references() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "def handler():\n    pass\n\nclass Strategy:\n    pass\n\ndef accept(cb):\n    cb()\n\ndef wire():\n    accept(handler)\n    accept(Strategy)\n\ndef retry():\n    accept(retry)\n",
+    )]));
+    assert!(
+        has_edge(&a, "m.wire", "REFERENCES", "m.handler"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "REFERENCES")
+            .collect::<Vec<_>>()
+    );
+    assert!(has_edge(&a, "m.wire", "REFERENCES", "m.Strategy"));
+    assert!(
+        !has_edge(&a, "m.retry", "REFERENCES", "m.retry"),
+        "no self-loop"
+    );
+}

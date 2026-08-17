@@ -103,6 +103,14 @@ type Embed struct {
 	FieldName  string `json:"field_name"`
 }
 
+// FnRef is a bare name in call-argument position — the one shape where a
+// function is verifiably handed around as a value.
+type FnRef struct {
+	Caller string `json:"caller"`
+	Name   string `json:"name"`
+	Line   int    `json:"line,omitempty"`
+}
+
 // Import is one import declaration. Alias is as written ("" when the default
 // name is used) — a list, not a map, because two blank imports may coexist.
 type Import struct {
@@ -153,6 +161,9 @@ type FileFacts struct {
 	Hints   []Hint   `json:"hints,omitempty"`
 	Returns []Ret    `json:"returns,omitempty"`
 	Embeds  []Embed  `json:"embeds,omitempty"`
+	// FnRefs are functions passed as values: `register(handler)` —
+	// (caller, bare name, line), argument position only.
+	FnRefs []FnRef `json:"fn_refs,omitempty"`
 	// Call sites too dynamic to name at all — `f()()`, chained selectors —
 	// counted so the notes can account for them.
 	Opaque int `json:"opaque,omitempty"`
@@ -575,6 +586,11 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 			}
 		default:
 			w.facts.Opaque++
+		}
+		for _, arg := range call.Args {
+			if id, ok := arg.(*ast.Ident); ok {
+				w.facts.FnRefs = append(w.facts.FnRefs, FnRef{Caller: caller, Name: id.Name, Line: w.line(call)})
+			}
 		}
 		return true
 	})

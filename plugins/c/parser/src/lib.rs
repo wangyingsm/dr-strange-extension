@@ -109,6 +109,10 @@ pub struct FileFacts {
     pub opaque: usize,
     /// Function-pointer bindings the bodies state.
     pub hints: Vec<Hint>,
+    /// `(caller, bare name, line)` — names passed as call arguments
+    /// (`register_handler(my_cb)`, `&my_cb`); resolved to REFERENCES only
+    /// when the name is an in-tree function.
+    pub fn_refs: Vec<(String, String, u64)>,
 }
 
 /// The extensions this plugin claims. `.h` is claimed too: a C header is C,
@@ -685,6 +689,17 @@ impl Walker<'_> {
                             // `ops->cfg->read()` and friends — a value's
                             // business.
                             None => self.facts.opaque += 1,
+                        }
+                    }
+                    if let Some(args) = node.child_by_field_name("arguments") {
+                        for a in args.named_children(&mut args.walk()) {
+                            if let Some(name) = self.fn_ref(a) {
+                                self.facts.fn_refs.push((
+                                    caller.to_string(),
+                                    name,
+                                    self.line(node),
+                                ));
+                            }
                         }
                     }
                 }

@@ -834,3 +834,39 @@ fn receiver_resolutions_are_stamped() {
         Some("receiver")
     );
 }
+
+/// C4 (narrow): a bare in-tree function passed as an argument is a
+/// REFERENCES fact — a class passed as a value is NOT (not a fn value in
+/// TS); never a self-loop.
+#[test]
+fn functions_passed_as_values_become_references() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export function handler(): void {}\nexport class Strategy {}\nexport function accept(cb: () => void): void { cb(); }\nexport function wire(): void { accept(handler); }\nexport function classy(consume: (x: unknown) => void): void { consume(Strategy); }\nexport function retry(): void { accept(retry); }\n",
+        ),
+    ]));
+    assert!(
+        a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "p/m.wire" && e.dst == "p/m.handler"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "REFERENCES")
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.dst == "p/m.Strategy"),
+        "a class is not a fn value in TS"
+    );
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "p/m.retry" && e.dst == "p/m.retry"),
+        "no self-loop"
+    );
+}

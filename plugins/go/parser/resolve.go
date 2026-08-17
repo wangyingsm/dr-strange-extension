@@ -424,6 +424,37 @@ func Assemble(all []FileFacts) Assembled {
 		}
 	}
 
+	// Functions passed as values (C4, narrow): a bare same-package function
+	// name in argument position becomes a REFERENCES edge — silent on a
+	// miss (most idents are values), never a self-loop.
+	refSeen := map[string]bool{}
+	for fi := range all {
+		f := &all[fi]
+		if f.Failed {
+			continue
+		}
+		for _, r := range f.FnRefs {
+			if builtins[r.Name] {
+				continue
+			}
+			d := forPkg(f.PkgPath)
+			key, ok := d.funcs[r.Name]
+			if !ok || key == r.Caller {
+				continue
+			}
+			dedup := r.Caller + "\x00" + key
+			if refSeen[dedup] {
+				continue
+			}
+			refSeen[dedup] = true
+			addEdge(Edge{Src: r.Caller, Dst: key, Type: "REFERENCES", Line: r.Line, Props: Props{
+				"_resolved_by": "fn-ref",
+				"_confidence":  "high",
+				"_ref":         r.Name,
+			}})
+		}
+	}
+
 	// Ledger nodes join `seen` before the implied pass — they are edge
 	// targets, and the implied pass would otherwise mint bare doubles.
 	ledgerKeys := make([]string, 0, len(unresolvedNodes))

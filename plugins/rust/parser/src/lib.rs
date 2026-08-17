@@ -148,6 +148,8 @@ pub struct FileFacts {
     /// `(caller key, struct path as written, line)` for struct-literal
     /// expressions — a `Widget { .. }` is a use of the type, worth an edge.
     insts: Vec<(String, String, u64)>,
+    /// `(caller key, bare name, line)` — functions passed as values.
+    fn_refs: Vec<(String, String, u64)>,
     /// `(trait key, supertrait base path as written, line)` — `trait E: D`.
     trait_bases: Vec<(String, String, u64)>,
     /// `(caller key, local name, how its type is known)` — the bindings whose
@@ -681,6 +683,7 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                         props,
                         calls: body.calls,
                         insts: body.insts,
+                        fn_refs: body.fn_refs,
                         ret: ret_shape(&m.sig),
                         locals: local_hints(&m.block)
                             .into_iter()
@@ -731,6 +734,8 @@ struct ImplMethod {
     calls: BTreeSet<Call>,
     /// `(struct path as written, line)` for the body's struct literals.
     insts: BTreeSet<(String, u64)>,
+    /// `(bare name, line)` — functions passed as values in the body.
+    fn_refs: BTreeSet<(String, u64)>,
     /// Declared return shape when usable; `Self` is resolved to the impl's
     /// type at assemble, where the type's key is known.
     ret: Option<RetShape>,
@@ -747,6 +752,24 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
     }
     for (path, line) in body.insts {
         f.insts.push((caller.to_string(), path, line));
+    }
+    for (name, line) in body.fn_refs {
+        f.fn_refs.push((caller.to_string(), name, line));
+    }
+}
+
+/// A bare (single-segment) name passed as a call argument — `handler` in
+/// `register(handler)` or `&handler` — the one shape where a function is
+/// verifiably being handed around as a value. Anything qualified, called
+/// or computed stays a value's business.
+fn bare_fn_arg(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+            let seg = &p.path.segments[0];
+            seg.arguments.is_none().then(|| seg.ident.to_string())
+        }
+        syn::Expr::Reference(r) => bare_fn_arg(&r.expr),
+        _ => None,
     }
 }
 
@@ -775,6 +798,9 @@ struct BodyFacts {
     calls: BTreeSet<Call>,
     /// `(struct path as written, first line)`.
     insts: BTreeSet<(String, u64)>,
+    /// `(bare name, first line)` — a function passed as a value:
+    /// `register(handler)`, `map(handler)`, `&handler`.
+    fn_refs: BTreeSet<(String, u64)>,
 }
 
 fn call_names(block: &syn::Block) -> BodyFacts {
@@ -791,6 +817,11 @@ fn call_names(block: &syn::Block) -> BodyFacts {
                     line: line_of(node),
                 });
             }
+            for arg in &node.args {
+                if let Some(name) = bare_fn_arg(arg) {
+                    self.0.fn_refs.insert((name, line_of(node)));
+                }
+            }
             syn::visit::visit_expr_call(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
@@ -800,6 +831,11 @@ fn call_names(block: &syn::Block) -> BodyFacts {
                 recv: recv_path(&node.receiver),
                 line: line_of(node),
             });
+            for arg in &node.args {
+                if let Some(name) = bare_fn_arg(arg) {
+                    self.0.fn_refs.insert((name, line_of(node)));
+                }
+            }
             syn::visit::visit_expr_method_call(self, node);
         }
         fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
@@ -1080,6 +1116,8 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut trait_impl_methods: BTreeMap<(String, String), String> = BTreeMap::new();
     // Struct literals, caller-attributed, paths expanded like calls.
     let mut pending_insts: Vec<(String, String, u64)> = Vec::new();
+    // Functions passed as values, caller-attributed.
+    let mut pending_fn_refs: Vec<(String, String, u64)> = Vec::new();
 
     let aliases = build_aliases(&files, &declared);
 
@@ -1117,6 +1155,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 expand_path(path, &imports, &f.module),
                 *line,
             ));
+        }
+        for (caller, name, line) in &f.fn_refs {
+            pending_fn_refs.push((caller.clone(), name.clone(), *line));
         }
         for (trait_key, written, line) in &f.trait_bases {
             let target = resolve(
@@ -1281,6 +1322,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                         None => expand_path(path, &imports, &b.module),
                     };
                     pending_insts.push((mkey.clone(), expanded, *line));
+                }
+                for (name, line) in &m.fn_refs {
+                    pending_fn_refs.push((mkey.clone(), name.clone(), *line));
                 }
                 // `Self` means this block's type, and only this block knows
                 // which — rewritten here for paths, returns and locals alike.
@@ -1574,6 +1618,26 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             out.edges
                 .push(edge_at(&caller, &target, "INSTANTIATES", line));
         }
+    }
+
+    // Functions passed as values (C4, narrow): a bare in-tree name in
+    // argument position becomes a REFERENCES edge — same innermost-unique
+    // discipline as bare calls, silent on a miss (most idents are values),
+    // never a self-loop.
+    let mut ref_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (caller, name, line) in pending_fn_refs {
+        let Some(cands) = fns.get(&name) else {
+            continue;
+        };
+        let Some(target) = pick(&caller, cands, &scopes) else {
+            continue;
+        };
+        if *target == caller || !ref_seen.insert((caller.clone(), target.clone())) {
+            continue;
+        }
+        let mut e = edge_at(&caller, target, "REFERENCES", line);
+        stamp(&mut e, "fn-ref", "high", &name);
+        out.edges.push(e);
     }
 
     out.nodes.extend(unresolved_nodes.into_values());

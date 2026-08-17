@@ -174,6 +174,8 @@ pub struct FileFacts {
     pub classes: Vec<String>,
     /// Type bindings the source states (annotations, `new`, factories).
     pub hints: Vec<Hint>,
+    /// `(caller, bare name, line)` — functions passed as call arguments.
+    pub fn_refs: Vec<(String, u64, String)>,
     /// `(callable key, declared return as written)` when it names a plain
     /// class — `Promise<T>` unwraps to `T`, which is what an async factory
     /// hands the awaiter.
@@ -1488,6 +1490,23 @@ impl CallCollector<'_, '_> {
     }
 }
 
+impl CallCollector<'_, '_> {
+    fn arg_refs(&mut self, args: &[ast::ExprOrSpread], line_span: Span) {
+        for a in args {
+            if a.spread.is_none()
+                && let ast::Expr::Ident(i) = &*a.expr
+            {
+                let line = self.walker.line(line_span);
+                let caller = self.caller.clone();
+                self.walker
+                    .facts
+                    .fn_refs
+                    .push((caller, line, i.sym.to_string()));
+            }
+        }
+    }
+}
+
 impl Visit for CallCollector<'_, '_> {
     fn visit_call_expr(&mut self, node: &ast::CallExpr) {
         if let ast::Callee::Expr(expr) = &node.callee {
@@ -1561,6 +1580,7 @@ impl Visit for CallCollector<'_, '_> {
                 _ => self.walker.facts.opaque += 1,
             }
         }
+        self.arg_refs(&node.args, node.span);
         node.visit_children_with(self);
     }
 

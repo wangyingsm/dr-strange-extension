@@ -778,3 +778,19 @@ func TestPackageLevelVarInitializerTypesIt(t *testing.T) {
 		t.Fatalf("package-level var initializer return types the receiver: %v", a.Edges)
 	}
 }
+
+// C4 (narrow): a bare in-package function passed as an argument is a
+// REFERENCES fact — argument position only, never a self-loop.
+func TestFunctionsPassedAsValuesBecomeReferences(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\nfunc handler() {}\n\nfunc register(cb func()) { cb() }\n\n" +
+			"func wire() { register(handler) }\n\nfunc retry() { register(retry) }\n",
+	}})
+	if !hasEdge(a, "m.wire", "REFERENCES", "m.handler") {
+		t.Fatalf("a function argument is a reference: %v", a.Edges)
+	}
+	if hasEdge(a, "m.retry", "REFERENCES", "m.retry") {
+		t.Fatalf("no self-loop: %v", a.Edges)
+	}
+}

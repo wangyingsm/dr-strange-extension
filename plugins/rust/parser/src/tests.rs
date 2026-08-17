@@ -1816,3 +1816,36 @@ fn impl_before_struct_is_order_independent() {
     assert!(has_edge(&a, "k::Later", "HAS_METHOD", "k::Later::go"));
     assert!(has_edge(&a, "k::run", "CALLS", "k::Later::go"));
 }
+
+/// C4 (narrow): a bare in-tree function passed as an argument is a
+/// REFERENCES fact — argument position only, never a self-loop.
+#[test]
+fn functions_passed_as_values_become_references() {
+    let t = Tree::new("bl-fnref");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub fn handler() {}\n",
+            "pub fn register(_cb: fn()) {}\n",
+            "pub fn wire() { register(handler); }\n",
+            "pub fn retry() { register(retry); }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "k::wire" && e.dst == "k::handler"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "REFERENCES")
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "k::retry" && e.dst == "k::retry"),
+        "no self-loop"
+    );
+}

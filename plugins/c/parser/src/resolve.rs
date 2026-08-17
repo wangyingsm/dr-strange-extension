@@ -9,6 +9,7 @@
 //! node.
 
 use crate::{Call, Edge, FileFacts, Node, Props, edge_at};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The assembled result: facts, and an account of what could not be done.
@@ -393,6 +394,36 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             unresolved += 1;
         }
     }
+    // Functions passed as values (C4, narrow): an argument naming an
+    // in-tree FUNCTION — own file first, unique definition elsewhere —
+    // becomes a REFERENCES edge. A variable argument resolves to nothing
+    // here (only functions live in these maps); never a self-loop.
+    let mut ref_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for f in &all {
+        let own_names = own.get(f.file.as_str());
+        for (caller, name, line) in &f.fn_refs {
+            let target = own_names
+                .and_then(|m| m.get(name))
+                .filter(|k| !suppressed.contains(*k))
+                .cloned()
+                .or_else(|| match defs.get(name).map(Vec::as_slice) {
+                    Some([one]) => Some(one.clone()),
+                    _ => None,
+                });
+            let Some(target) = target else { continue };
+            if target == *caller || !ref_seen.insert((caller.clone(), target.clone())) {
+                continue;
+            }
+            let mut e = edge_at(caller, &target, "REFERENCES", *line);
+            e.props
+                .insert("_resolved_by".into(), Value::String("fn-ref".into()));
+            e.props
+                .insert("_confidence".into(), Value::String("high".into()));
+            e.props.insert("_ref".into(), Value::String(name.clone()));
+            add_edge(&mut pending, &mut edge_set, e);
+        }
+    }
+
     out.edges = pending;
 
     // ---- implied and external nodes --------------------------------------

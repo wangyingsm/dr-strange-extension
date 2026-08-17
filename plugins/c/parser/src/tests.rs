@@ -518,3 +518,36 @@ fn unbound_member_calls_never_guess() {
     );
     note_containing(&a, "left unresolved");
 }
+
+/// C4 (narrow): a function name in argument position — plain or
+/// address-of — is a REFERENCES fact; a variable argument resolves to
+/// nothing; never a self-loop.
+#[test]
+fn functions_passed_as_values_become_references() {
+    let a = run(vec![(
+        "m.c",
+        "void my_cb(int x) {}\nvoid register_handler(void (*cb)(int)) { cb(1); }\nvoid wire(void) {\n    int count = 3;\n    register_handler(my_cb);\n    register_handler(&my_cb);\n    log_count(count);\n}\nvoid log_count(int c) {}\nvoid retry(void) { register_handler((void (*)(int))retry); }\n",
+    )]);
+    assert!(
+        a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "m.c::wire" && e.dst == "m.c::my_cb"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "REFERENCES")
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.dst == "m.c::retry"),
+        "no self-loop (and casts stay out of the narrow form)"
+    );
+    // `count` is a local int: no reference minted for it.
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "REFERENCES" && e.src == "m.c::wire" && e.dst.contains("count")),
+    );
+}

@@ -601,6 +601,40 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
 
+        // Functions passed as values (C4, narrow): a bare in-tree callable
+        // in argument position — declared here or imported — becomes a
+        // REFERENCES edge. Classes stay out (not fn values in TS); silent
+        // on a miss; never a self-loop.
+        for (caller, line, name) in &f.fn_refs {
+            let target = match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
+                Some((key, callable)) if *callable && !classes.contains(key) => Some(key.clone()),
+                _ => match bindings.get(name.as_str()) {
+                    Some((imported, spec)) if *imported != "*" => {
+                        match ix.resolve_spec(&f.file, spec) {
+                            Resolved::Module(target) => {
+                                let n = if *imported == "default" {
+                                    "default"
+                                } else {
+                                    imported
+                                };
+                                ix.lookup_export(&target, n, 0)
+                                    .filter(|k| !classes.contains(k))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(target) = target
+                && target != *caller
+            {
+                let mut e = stamped(caller, &target, *line, "fn-ref", name);
+                e.ty = "REFERENCES".into();
+                add_edge(&mut pending_edges, &mut edge_set, e);
+            }
+        }
+
         for (class_key, written, ty, line) in &f.clauses {
             let target = if let Some((obj, name)) = written.split_once('.') {
                 match bindings.get(obj) {

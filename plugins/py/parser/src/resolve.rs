@@ -625,6 +625,41 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // Functions passed as values (C4, narrow): a bare in-tree name in
+    // argument position — a module-level def, or a class (Python's
+    // class-as-value idiom), local or imported — becomes a REFERENCES
+    // edge. Silent on a miss, never a self-loop.
+    let mut ref_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for (caller, name, line) in &f.fn_refs {
+            if BUILTINS.contains(&name.as_str()) {
+                continue;
+            }
+            let target =
+                match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
+                    Some((key, is_value)) if !*is_value => Some(key.clone()),
+                    _ => bindings
+                        .get(name)
+                        .and_then(|(t, m)| if m.is_empty() { None } else { ix.decl(t, m) }),
+                };
+            let Some(target) = target else { continue };
+            if target == *caller || !seen.contains(&target) {
+                continue;
+            }
+            if !ref_seen.insert((caller.clone(), target.clone())) {
+                continue;
+            }
+            let mut e = edge_at(caller, &target, "REFERENCES", *line);
+            e.props
+                .insert("_resolved_by".into(), Value::String("fn-ref".into()));
+            e.props
+                .insert("_confidence".into(), Value::String("high".into()));
+            e.props.insert("_ref".into(), Value::String(name.clone()));
+            add_edge(&mut pending, &mut edge_set, e);
+        }
+    }
+
     // Into `seen` as well: a ledger key is an edge target, and the implied-
     // node pass below would otherwise mint a second, bare node for it.
     seen.extend(unresolved_nodes.keys().cloned());

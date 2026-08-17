@@ -163,6 +163,9 @@ pub struct FileFacts {
     pub classes: Vec<String>,
     /// Type bindings the source states (annotations, constructor results).
     pub hints: Vec<Hint>,
+    /// `(caller, bare name, line)` — functions (or classes: Python's
+    /// class-as-value idiom) passed as call arguments.
+    pub fn_refs: Vec<(String, String, u64)>,
     /// `(function key, return annotation as written)` when it is a plain
     /// dotted name — what types `x = make()`.
     pub returns: Vec<(String, String)>,
@@ -1142,6 +1145,15 @@ impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
         }
         if let ast::Expr::Call(call) = expr {
             let line = self.walker.line(call.range());
+            for arg in &*call.arguments.args {
+                if let ast::Expr::Name(n) = arg {
+                    let caller = self.caller.clone();
+                    self.walker
+                        .facts
+                        .fn_refs
+                        .push((caller, n.id.to_string(), line));
+                }
+            }
             match &*call.func {
                 ast::Expr::Name(n) => self.walker.facts.calls.push(Call {
                     caller: self.caller.clone(),
