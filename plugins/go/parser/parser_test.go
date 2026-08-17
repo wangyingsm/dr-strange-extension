@@ -2,6 +2,7 @@ package parser
 
 import (
 	"encoding/json"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -619,5 +620,148 @@ func TestLinesAndFilesAreRecorded(t *testing.T) {
 	p := node(t, a, "m")
 	if _, has := p.Props["file"]; has {
 		t.Fatalf("package must not claim one file: %+v", p.Props)
+	}
+}
+
+// ---- baseline eval board: mined from codegraph + codebase-memory-mcp ----
+// Red until receiver typing / stamps / ledger land in the go resolver; run
+// with DRSG_EVAL=1 (the `just eval` recipe), skipped in normal CI.
+
+func evalOnly(t *testing.T) {
+	if os.Getenv("DRSG_EVAL") == "" {
+		t.Skip("baseline eval board — run with DRSG_EVAL=1")
+	}
+}
+
+// cbm golsp_param_type_simple + the decoy discipline: a parameter's declared
+// type names the receiver, and two same-named methods never cross.
+func TestParamTypedReceiversResolveWithoutCrossing(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Logger struct{}\n\nfunc (l Logger) Log() int { return 1 }\n\n" +
+			"type Other struct{}\n\nfunc (o Other) Log() int { return 2 }\n\n" +
+			"func UseIt(lg Logger) int { return lg.Log() }\n\nfunc UseOther(o Other) int { return o.Log() }\n",
+	}})
+	if !hasEdge(a, "m.UseIt", "CALLS", "m.Logger.Log") {
+		t.Fatalf("param type names the receiver: %v", a.Edges)
+	}
+	if !hasEdge(a, "m.UseOther", "CALLS", "m.Other.Log") {
+		t.Fatalf("param type names the receiver: %v", a.Edges)
+	}
+	if hasEdge(a, "m.UseIt", "CALLS", "m.Other.Log") || hasEdge(a, "m.UseOther", "CALLS", "m.Logger.Log") {
+		t.Fatalf("same-named methods must never cross-attribute: %v", a.Edges)
+	}
+}
+
+// cbm golsp_composite_literal + golsp_return_type: locals typed by a
+// composite literal and by a declared return type both dispatch.
+func TestLocalInitializersTypeTheReceiver(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Config struct{}\n\nfunc (c *Config) Validate() bool { return true }\n\n" +
+			"type File struct{}\n\nfunc (f *File) Read() int { return 0 }\n\n" +
+			"func Open(path string) *File { return &File{} }\n\n" +
+			"func makeConfig() bool { c := &Config{}\n\treturn c.Validate() }\n\n" +
+			"func doRead() int { f := Open(\"/tmp\")\n\treturn f.Read() }\n",
+	}})
+	if !hasEdge(a, "m.makeConfig", "CALLS", "m.Config.Validate") {
+		t.Fatalf("composite-literal init types the local: %v", a.Edges)
+	}
+	if !hasEdge(a, "m.doRead", "CALLS", "m.File.Read") {
+		t.Fatalf("declared return type types the local: %v", a.Edges)
+	}
+}
+
+// cbm golsp_multi_return: the first value of a (T, error) return is the type.
+func TestMultiReturnFirstValueTypesTheLocal(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Conn struct{}\n\nfunc (c *Conn) Close() {}\n\n" +
+			"func Dial(addr string) (*Conn, error) { return &Conn{}, nil }\n\n" +
+			"func doConnect() { c, _ := Dial(\"localhost\")\n\tc.Close() }\n",
+	}})
+	if !hasEdge(a, "m.doConnect", "CALLS", "m.Conn.Close") {
+		t.Fatalf("first result of a multi-return types the local: %v", a.Edges)
+	}
+}
+
+// cbm golsp_struct_embedding: a method promoted from an embedded struct
+// resolves to the embedded type's method.
+func TestEmbeddedMethodsPromoteToTheEmbeddedType(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Base struct{}\n\nfunc (b *Base) Save() {}\n\n" +
+			"type Decoy struct{}\n\nfunc (d *Decoy) Save() {}\n\n" +
+			"type Extended struct{ Base }\n\nfunc persist(e *Extended) { e.Save() }\n",
+	}})
+	if !hasEdge(a, "m.persist", "CALLS", "m.Base.Save") {
+		t.Fatalf("promotion reaches the embedded type's method: %v", a.Edges)
+	}
+	if hasEdge(a, "m.persist", "CALLS", "m.Decoy.Save") {
+		t.Fatalf("a same-named method on an unrelated type never wins: %v", a.Edges)
+	}
+}
+
+// cbm golsp_interface_satisfaction: a single-implementer interface call
+// resolves to the concrete method (the satisfy pass already knows).
+func TestSingleImplInterfaceCallsResolveToTheConcreteMethod(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Store interface {\n\tGet(k string) string\n}\n\n" +
+			"type RedisStore struct{}\n\nfunc (r *RedisStore) Get(k string) string { return k }\n\n" +
+			"func process(s Store) string { return s.Get(\"k\") }\n",
+	}})
+	if !hasEdge(a, "m.process", "CALLS", "m.RedisStore.Get") &&
+		!hasEdge(a, "m.process", "CALLS", "m.Store.Get") {
+		t.Fatalf("an interface-typed receiver dispatches (concrete when unique): %v", a.Edges)
+	}
+}
+
+// P1 parity: resolved call edges carry stamps, and what stays unresolved
+// becomes a queryable UnresolvedRef with a reason — not just a count.
+func TestResolvedCallsAreStampedAndMissesAreLedgered(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\nfunc helper() {}\n\nfunc run(x interface{ Weird() }) {\n\thelper()\n\tx.Weird()\n}\n",
+	}})
+	var stamped bool
+	for _, e := range a.Edges {
+		if e.Type == "CALLS" && e.Src == "m.run" && e.Dst == "m.helper" {
+			if e.Props["_resolved_by"] != nil && e.Props["_confidence"] != nil {
+				stamped = true
+			}
+		}
+	}
+	if !stamped {
+		t.Fatalf("resolved calls carry {_resolved_by,_confidence}: %v", a.Edges)
+	}
+	var ledgered bool
+	for _, n := range a.Nodes {
+		if n.Label == "UnresolvedRef" {
+			ledgered = true
+		}
+	}
+	if !ledgered {
+		t.Fatalf("an unresolvable call is a queryable UnresolvedRef, not a bare count: %v", a.Notes)
+	}
+}
+
+// cbm golsp_package_level_var: a package-level var's initializer types it.
+func TestPackageLevelVarInitializerTypesIt(t *testing.T) {
+	evalOnly(t)
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Database struct{}\n\nfunc (d *Database) Query() int { return 1 }\n\n" +
+			"func NewDatabase() *Database { return &Database{} }\n\nvar db = NewDatabase()\n\n" +
+			"func handler() int { return db.Query() }\n",
+	}})
+	if !hasEdge(a, "m.handler", "CALLS", "m.Database.Query") {
+		t.Fatalf("package-level var initializer return types the receiver: %v", a.Edges)
 	}
 }

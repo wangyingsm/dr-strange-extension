@@ -77,3 +77,4 @@ test:
 eval:
     -cd plugins/py/parser && cargo test -- --ignored
     -cd plugins/rust/parser && cargo test -- --ignored
+    -cd plugins/go/parser && DRSG_EVAL=1 go test ./...

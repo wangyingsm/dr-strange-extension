@@ -66,10 +66,17 @@ func (goPlugin) Assemble(partials [][]byte, _ map[string]string) (ext.Output, er
 	}
 	for _, e := range a.Edges {
 		edge := ext.Edge{Src: e.Src, Dst: e.Dst, Type: e.Type}
-		if e.Line > 0 {
-			// Where the relation is written: the call site, the import
-			// statement, the declared member.
-			edge.Props = ext.Props{"line": e.Line}
+		if e.Line > 0 || len(e.Props) > 0 {
+			props := ext.Props{}
+			for k, v := range e.Props {
+				props[k] = v
+			}
+			if e.Line > 0 {
+				// Where the relation is written: the call site, the import
+				// statement, the declared member.
+				props["line"] = e.Line
+			}
+			edge.Props = props
 		}
 		out.Edges = append(out.Edges, edge)
 	}

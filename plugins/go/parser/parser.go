@@ -56,6 +56,9 @@ type Edge struct {
 	Dst  string `json:"dst"`
 	Type string `json:"type"`
 	Line int    `json:"line,omitempty"`
+	// Resolution stamps and reasons (P1 family conventions) — empty for
+	// edges that carry none.
+	Props Props `json:"props,omitempty"`
 }
 
 // Call is a call site held until every file is known. Alias is the package
