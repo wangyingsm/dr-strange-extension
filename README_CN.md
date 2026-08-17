@@ -43,18 +43,23 @@
 
 | 插件 | 处理的扩展名 | 底层解析器 | 安装 |
 |---|---|---|---|
-| `rust` | `.rs` | [syn](https://crates.io/crates/syn) | [rust-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm) |
-| `go` | `.go` | Go 自带的 `go/parser`（经 TinyGo 编译） | [go-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/go-v1.0.0/go.wasm) |
-| `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) —— 同时支持 ESM 与 CommonJS | [ts-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/ts-v1.0.0/ts.wasm) |
-| `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff) 的解析器 | [py-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/py-v1.0.0/py.wasm) |
-| `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [java-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/java-v1.0.0/java.wasm) |
-| `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [c-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/c-v1.0.0/c.wasm) |
-| `web` | `.html .htm .css` | tree-sitter html/css/js —— 一个插件同时处理两种语言，`class="btn"` 才能绑定到定义 `.btn` 的样式表 | [web-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/web-v1.0.0/web.wasm) |
-| `toml` | `.toml` | [toml](https://crates.io/crates/toml) —— 最小的、但仍然完整的插件 | [toml-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/toml-v1.0.0/toml.wasm) |
+| `rust` | `.rs` | [syn](https://crates.io/crates/syn) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=rust-v&expanded=true) |
+| `go` | `.go` | Go 自带的 `go/parser`（经 TinyGo 编译） | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=go-v&expanded=true) |
+| `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) —— 同时支持 ESM 与 CommonJS | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=ts-v&expanded=true) |
+| `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff) 的解析器 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=py-v&expanded=true) |
+| `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=java-v&expanded=true) |
+| `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=c-v&expanded=true) |
+| `web` | `.html .htm .css` | tree-sitter html/css/js —— 一个插件同时处理两种语言，`class="btn"` 才能绑定到定义 `.btn` 的样式表 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=web-v&expanded=true) |
+| `toml` | `.toml` | [toml](https://crates.io/crates/toml) —— 最小的、但仍然完整的插件 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=toml-v&expanded=true) |
+
+每个「最新版」链接会将[发布页](https://github.com/wangyingsm/dr-strange-extension/releases)
+过滤到该插件的标签，最新的排在最前；每个发布都带有 `<plugin>.wasm` 与其
+`.sha256`。最省事的方式不需要任何 URL：不带参数的 `drsg plugin install`
+会交互式列出这份目录，固定在与你的 drsg 构建兼容的已验证版本上。
 
 ```console
-$ drsg plugin install https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm
-installed rust@2  sha256:f0170fcf1406
+$ drsg plugin install https://github.com/wangyingsm/dr-strange-extension/releases/download/<tag>/rust.wasm
+installed rust@2  sha256:8e3c32be0add
   handles: .rs
 ```
 

@@ -48,18 +48,24 @@ every load.
 
 | Plugin | Claims | Parser underneath | Install |
 |---|---|---|---|
-| `rust` | `.rs` | [syn](https://crates.io/crates/syn) | [rust-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm) |
-| `go` | `.go` | Go's own `go/parser`, via TinyGo | [go-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/go-v1.0.0/go.wasm) |
-| `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) — ESM **and** CommonJS | [ts-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/ts-v1.0.0/ts.wasm) |
-| `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff)'s parser | [py-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/py-v1.0.0/py.wasm) |
-| `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [java-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/java-v1.0.0/java.wasm) |
-| `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [c-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/c-v1.0.0/c.wasm) |
-| `web` | `.html .htm .css` | tree-sitter html/css/js — one plugin, so `class="btn"` binds to the stylesheet that defines `.btn` | [web-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/web-v1.0.0/web.wasm) |
-| `toml` | `.toml` | [toml](https://crates.io/crates/toml) — the smallest plugin that is still a plugin | [toml-v1.0.0](https://github.com/wangyingsm/dr-strange-extension/releases/download/toml-v1.0.0/toml.wasm) |
+| `rust` | `.rs` | [syn](https://crates.io/crates/syn) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=rust-v&expanded=true) |
+| `go` | `.go` | Go's own `go/parser`, via TinyGo | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=go-v&expanded=true) |
+| `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) — ESM **and** CommonJS | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=ts-v&expanded=true) |
+| `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff)'s parser | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=py-v&expanded=true) |
+| `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=java-v&expanded=true) |
+| `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=c-v&expanded=true) |
+| `web` | `.html .htm .css` | tree-sitter html/css/js — one plugin, so `class="btn"` binds to the stylesheet that defines `.btn` | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=web-v&expanded=true) |
+| `toml` | `.toml` | [toml](https://crates.io/crates/toml) — the smallest plugin that is still a plugin | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=toml-v&expanded=true) |
+
+Each *latest* link filters the [releases page](https://github.com/wangyingsm/dr-strange-extension/releases)
+to that plugin's tags, newest first; every release carries the `<plugin>.wasm`
+and its `.sha256`. The easiest path needs no URL at all: a bare
+`drsg plugin install` lists this catalog interactively, pinned to the
+versions known-good with your drsg build.
 
 ```console
-$ drsg plugin install https://github.com/wangyingsm/dr-strange-extension/releases/download/rust-v1.0.0/rust.wasm
-installed rust@2  sha256:f0170fcf1406
+$ drsg plugin install https://github.com/wangyingsm/dr-strange-extension/releases/download/<tag>/rust.wasm
+installed rust@2  sha256:8e3c32be0add
   handles: .rs
 ```
 
