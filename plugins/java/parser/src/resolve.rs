@@ -293,11 +293,47 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
+    // ---- receiver-typing indexes (params, locals, fields, returns) --------
+    // Hints resolve to IN-TREE types only: an external receiver's methods
+    // are a checker's business and stay out (counted unresolved).
+    let mut hint_ix: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut returns_ix: BTreeMap<String, String> = BTreeMap::new();
+    for f in &all {
+        for h in &f.hints {
+            if let Ok((key, true)) = ix.type_ref(&h.written, f) {
+                hint_ix
+                    .entry((h.caller.clone(), h.name.clone()))
+                    .or_insert(key);
+            }
+        }
+        for (mkey, written) in &f.returns {
+            if let Ok((key, true)) = ix.type_ref(written, f) {
+                returns_ix.entry(mkey.clone()).or_insert(key);
+            }
+        }
+    }
+    let stamped = |src: &str, dst: &str, line: u64, strategy: &str, written: &str| -> Edge {
+        let mut e = edge_at(src, dst, "CALLS", line);
+        e.props
+            .insert("_resolved_by".into(), Value::String(strategy.into()));
+        e.props
+            .insert("_confidence".into(), Value::String("high".into()));
+        e.props.insert("_ref".into(), Value::String(written.into()));
+        e
+    };
+
     // ---- calls and clauses -------------------------------------------------
     let mut unresolved = 0usize;
     let mut external_calls = 0usize;
     for f in &all {
         unresolved += f.opaque;
+        // A value's stated class: a local or parameter of the caller, else a
+        // field of the enclosing type (bare field names reach here too).
+        let type_of = |caller: &str, in_type: &str, name: &str| -> Option<&String> {
+            hint_ix
+                .get(&(caller.to_string(), name.to_string()))
+                .or_else(|| hint_ix.get(&(in_type.to_string(), name.to_string())))
+        };
 
         for c in &f.calls {
             match &c.kind {
@@ -376,6 +412,91 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     }
                     Err(()) => unresolved += 1,
                 },
+                CallKind::Receiver { name, method } => {
+                    let hit = type_of(&c.caller, &c.in_type, name)
+                        .and_then(|class| ix.find_method(f, class, method, 0));
+                    match hit {
+                        Some(owner) => add_edge(
+                            &mut pending,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &format!("{owner}.{method}"),
+                                c.line,
+                                "receiver",
+                                &format!("{name}.{method}"),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::SelfField { field, method } => {
+                    let hit = hint_ix
+                        .get(&(c.in_type.clone(), field.clone()))
+                        .and_then(|class| ix.find_method(f, class, method, 0));
+                    match hit {
+                        Some(owner) => add_edge(
+                            &mut pending,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &format!("{owner}.{method}"),
+                                c.line,
+                                "self-attr",
+                                &format!("this.{field}.{method}"),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::FieldChain { obj, field, method } => {
+                    let hit = type_of(&c.caller, &c.in_type, obj)
+                        .and_then(|c1| hint_ix.get(&(c1.clone(), field.clone())))
+                        .and_then(|c2| ix.find_method(f, c2, method, 0));
+                    match hit {
+                        Some(owner) => add_edge(
+                            &mut pending,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &format!("{owner}.{method}"),
+                                c.line,
+                                "receiver",
+                                &format!("{obj}.{field}.{method}"),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::StaticChain {
+                    type_ref,
+                    first,
+                    method,
+                } => {
+                    // The factory's declared return names what the chain
+                    // holds; both hops must be this tree's to say anything.
+                    let hit = ix
+                        .type_ref(type_ref, f)
+                        .ok()
+                        .filter(|(_, in_tree)| *in_tree)
+                        .and_then(|(k, _)| ix.find_method(f, &k, first, 0))
+                        .and_then(|owner| returns_ix.get(&format!("{owner}.{first}")))
+                        .and_then(|ret| ix.find_method(f, ret, method, 0));
+                    match hit {
+                        Some(owner) => add_edge(
+                            &mut pending,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &format!("{owner}.{method}"),
+                                c.line,
+                                "chain",
+                                &format!("{type_ref}.{first}().{method}"),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
                 CallKind::Super(method) => {
                     // The extends chain, where this tree holds it.
                     let resolved = ix

@@ -71,6 +71,35 @@ pub enum CallKind {
     New(String),
     /// `super.m()` — the extends chain, where this tree holds it.
     Super(String),
+    /// `lg.log()` — a value receiver, typed when the source states its
+    /// class (a declared local, a parameter, or a field).
+    Receiver { name: String, method: String },
+    /// `this.field.m()` — through the field's declared type.
+    SelfField { field: String, method: String },
+    /// `obj.field.m()` — one field hop on a typed value.
+    FieldChain {
+        obj: String,
+        field: String,
+        method: String,
+    },
+    /// `Foo.getInstance().bar()` — a static factory chain, typed by the
+    /// factory's declared return.
+    StaticChain {
+        type_ref: String,
+        first: String,
+        method: String,
+    },
+}
+
+/// How a name is bound to a type the source states — a declared local, a
+/// parameter, or a field. `caller` is a method key for locals and params, a
+/// TYPE key for fields.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hint {
+    pub caller: String,
+    pub name: String,
+    /// The type as written (generics stripped to what they subscript).
+    pub written: String,
 }
 
 /// One name a type reference can bind through: `import a.b.C` binds C;
@@ -119,6 +148,11 @@ pub struct FileFacts {
     /// The package docstring, from `package-info.java`.
     pub package_doc: Option<String>,
     pub opaque: usize,
+    /// Type bindings the source states (params, locals, fields).
+    pub hints: Vec<Hint>,
+    /// `(method key, declared return as written)` when it names a plain
+    /// type — what types a static-factory chain.
+    pub returns: Vec<(String, String)>,
 }
 
 /// The extensions this plugin claims.
@@ -362,11 +396,18 @@ impl Walker<'_> {
                             .child_by_field_name("type")
                             .map(|t| self.text(t))
                             .unwrap_or_default();
+                        let typed = member
+                            .child_by_field_name("type")
+                            .and_then(|t| self.type_name(t));
                         for d in member.named_children(&mut member.walk()) {
                             if d.kind() == "variable_declarator"
                                 && let Some(n) = d.child_by_field_name("name")
                             {
-                                fields.push(format!("{}: {ty}", self.text(n)));
+                                let fname = self.text(n);
+                                if let Some(written) = &typed {
+                                    self.hint(&key, fname.clone(), written.clone());
+                                }
+                                fields.push(format!("{fname}: {ty}"));
                             }
                         }
                     }
@@ -392,11 +433,18 @@ impl Walker<'_> {
                                         .child_by_field_name("type")
                                         .map(|t| self.text(t))
                                         .unwrap_or_default();
+                                    let typed = m
+                                        .child_by_field_name("type")
+                                        .and_then(|t| self.type_name(t));
                                     for d in m.named_children(&mut m.walk()) {
                                         if d.kind() == "variable_declarator"
                                             && let Some(n) = d.child_by_field_name("name")
                                         {
-                                            fields.push(format!("{}: {ty}", self.text(n)));
+                                            let fname = self.text(n);
+                                            if let Some(written) = &typed {
+                                                self.hint(&key, fname.clone(), written.clone());
+                                            }
+                                            fields.push(format!("{fname}: {ty}"));
                                         }
                                     }
                                 }
@@ -452,6 +500,21 @@ impl Walker<'_> {
             .push(edge_at(&parent, &key, "CONTAINS", line));
         self.facts.types.push(decl);
         Some(key)
+    }
+
+    fn hint(&mut self, caller: &str, name: String, written: String) {
+        if !self
+            .facts
+            .hints
+            .iter()
+            .any(|h| h.caller == caller && h.name == name)
+        {
+            self.facts.hints.push(Hint {
+                caller: caller.to_string(),
+                name,
+                written,
+            });
+        }
     }
 
     fn method(
@@ -516,6 +579,28 @@ impl Walker<'_> {
         }
         self.annotations(node, &key);
 
+        // Receiver-typing inputs: the declared return (what a static
+        // factory hands its caller) and the annotated parameters.
+        if let Some(t) = node.child_by_field_name("type")
+            && let Some(written) = self.type_name(t)
+        {
+            self.facts.returns.push((key.clone(), written));
+        }
+        if let Some(params) = node.child_by_field_name("parameters") {
+            for pnode in params.named_children(&mut params.walk()) {
+                if matches!(pnode.kind(), "formal_parameter" | "spread_parameter")
+                    && let (Some(t), Some(n)) = (
+                        pnode.child_by_field_name("type"),
+                        pnode.child_by_field_name("name"),
+                    )
+                    && let Some(written) = self.type_name(t)
+                {
+                    let pname = self.text(n);
+                    self.hint(&key, pname, written);
+                }
+            }
+        }
+
         if let Some(body) = node.child_by_field_name("body") {
             self.collect_calls(&key, type_key, type_name, body);
         }
@@ -574,20 +659,94 @@ impl Walker<'_> {
                             Some(obj) => match obj.kind() {
                                 "this" => Some(CallKind::Own(name)),
                                 "super" => Some(CallKind::Super(name)),
-                                "identifier" | "scoped_identifier" | "field_access" => {
+                                "identifier" | "scoped_identifier" => {
                                     let written = self.text(obj);
                                     // A capitalized final segment is a type
-                                    // reference, written down; a lowercase one
-                                    // is a value, a checker's business.
+                                    // reference, written down; a lowercase
+                                    // bare identifier is a value the source
+                                    // may have typed.
                                     let last = written.rsplit('.').next().unwrap_or(&written);
                                     if last.chars().next().is_some_and(char::is_uppercase) {
                                         Some(CallKind::Static {
                                             type_ref: written,
                                             method: name,
                                         })
+                                    } else if obj.kind() == "identifier" {
+                                        Some(CallKind::Receiver {
+                                            name: written,
+                                            method: name,
+                                        })
                                     } else {
                                         self.facts.opaque += 1;
                                         None
+                                    }
+                                }
+                                "field_access" => {
+                                    let inner = obj.child_by_field_name("object");
+                                    let field =
+                                        obj.child_by_field_name("field").map(|n| self.text(n));
+                                    match (inner.map(|o| o.kind()), field) {
+                                        (Some("this"), Some(field)) => Some(CallKind::SelfField {
+                                            field,
+                                            method: name,
+                                        }),
+                                        (Some("identifier"), Some(field)) => {
+                                            let objname = self.text(inner.unwrap());
+                                            if objname
+                                                .chars()
+                                                .next()
+                                                .is_some_and(char::is_uppercase)
+                                            {
+                                                // `System.out.…` — a static
+                                                // field of a type this tree
+                                                // may not hold; a checker's
+                                                // business.
+                                                self.facts.opaque += 1;
+                                                None
+                                            } else {
+                                                Some(CallKind::FieldChain {
+                                                    obj: objname,
+                                                    field,
+                                                    method: name,
+                                                })
+                                            }
+                                        }
+                                        _ => {
+                                            self.facts.opaque += 1;
+                                            None
+                                        }
+                                    }
+                                }
+                                // `Foo.getInstance().bar()` — the factory's
+                                // declared return types the chain.
+                                "method_invocation" => {
+                                    let first =
+                                        obj.child_by_field_name("name").map(|n| self.text(n));
+                                    let base = obj.child_by_field_name("object");
+                                    match (base, first) {
+                                        (Some(b), Some(first))
+                                            if matches!(
+                                                b.kind(),
+                                                "identifier" | "scoped_identifier"
+                                            ) && self
+                                                .text(b)
+                                                .rsplit('.')
+                                                .next()
+                                                .unwrap_or_default()
+                                                .chars()
+                                                .next()
+                                                .is_some_and(char::is_uppercase) =>
+                                        {
+                                            Some(CallKind::StaticChain {
+                                                type_ref: self.text(b),
+                                                first,
+                                                method: name,
+                                            })
+                                        }
+                                        _ => {
+                                            self.facts.opaque += 1;
+                                            None
+                                        }
                                     }
                                 }
                                 _ => {
@@ -616,6 +775,39 @@ impl Walker<'_> {
                             kind: CallKind::New(written),
                             line: self.line(node),
                         });
+                    }
+                }
+                // A declared local states its type; `var` states it through
+                // a `new` initializer.
+                "local_variable_declaration" => {
+                    let declared = node.child_by_field_name("type").and_then(|t| {
+                        if self.text(t) == "var" {
+                            None
+                        } else {
+                            self.type_name(t)
+                        }
+                    });
+                    for d in node.named_children(&mut node.walk()) {
+                        if d.kind() != "variable_declarator" {
+                            continue;
+                        }
+                        let Some(n) = d.child_by_field_name("name") else {
+                            continue;
+                        };
+                        let written = declared.clone().or_else(|| {
+                            d.child_by_field_name("value").and_then(|v| {
+                                (v.kind() == "object_creation_expression")
+                                    .then(|| {
+                                        v.child_by_field_name("type")
+                                            .and_then(|t| self.type_name(t))
+                                    })
+                                    .flatten()
+                            })
+                        });
+                        if let Some(written) = written {
+                            let vname = self.text(n);
+                            self.hint(caller, vname, written);
+                        }
                     }
                 }
                 // A local class's calls still belong to the method a reader

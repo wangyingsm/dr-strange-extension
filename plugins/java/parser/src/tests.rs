@@ -453,3 +453,104 @@ fn include_source_attaches_the_declaration() {
         n.props
     );
 }
+
+// ---- baseline Tier B: receiver typing, chains, fields (mined) ------------
+
+/// A declared local types the receiver — and two same-named methods never
+/// cross-attribute (the Logger/Other decoy discipline).
+#[test]
+fn declared_locals_type_receivers_without_crossing() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nclass Logger { int log() { return 1; } }\nclass Other { int log() { return 2; } }\nclass Main {\n  int use() { Logger lg = new Logger(); return lg.log(); }\n  int useOther() { Other o = new Other(); return o.log(); }\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.Main.use", "CALLS", "m.Logger.log"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "m.Main.useOther", "CALLS", "m.Other.log"));
+    assert!(!has_edge(&a, "m.Main.use", "CALLS", "m.Other.log"));
+    assert!(!has_edge(&a, "m.Main.useOther", "CALLS", "m.Logger.log"));
+}
+
+/// A parameter's declared type and a `var` local's `new` initializer both
+/// dispatch; inheritance walks to the base where the method lives.
+#[test]
+fn params_vars_and_inheritance_type_receivers() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nclass Animal { int breathe() { return 1; } }\nclass Dog extends Animal { }\nclass Main {\n  int walk(Dog d) { return d.breathe(); }\n  int walkVar() { var d = new Dog(); return d.breathe(); }\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.Main.walk", "CALLS", "m.Animal.breathe"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "m.Main.walkVar", "CALLS", "m.Animal.breathe"));
+}
+
+/// A field's declared type resolves `this.field.m()` and bare `field.m()`;
+/// a one-hop chain through another object's field resolves too.
+#[test]
+fn field_types_resolve_member_chains() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nclass Repo { int all() { return 1; } }\nclass App {\n  Repo repo;\n  int render() { return this.repo.all(); }\n  int bare() { return repo.all(); }\n}\nclass Main {\n  int use(App app) { return app.repo.all(); }\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.App.render", "CALLS", "m.Repo.all"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "m.App.bare", "CALLS", "m.Repo.all"));
+    assert!(has_edge(&a, "m.Main.use", "CALLS", "m.Repo.all"));
+}
+
+/// codegraph #645: a static factory chain resolves through the factory's
+/// declared return — and a same-named decoy method never wins.
+#[test]
+fn static_factory_chains_resolve_through_declared_returns() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nclass Aaa { int bar() { return 1; } }\nclass Foo {\n  static Foo getInstance() { return new Foo(); }\n  int bar() { return 2; }\n}\nclass Main {\n  int use() { return Foo.getInstance().bar(); }\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.Main.use", "CALLS", "m.Foo.bar"),
+        "{:?}",
+        a.edges
+    );
+    assert!(!has_edge(&a, "m.Main.use", "CALLS", "m.Aaa.bar"));
+}
+
+/// cbm (load-bearing): enum methods are walked and receiver-qualified.
+#[test]
+fn enum_methods_resolve_like_any_other() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nenum Day {\n  SAT, SUN;\n  int label() { return 1; }\n}\nclass Main {\n  int use(Day day) { return day.label(); }\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.Main.use", "CALLS", "m.Day.label"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// The typed paths carry the family stamps.
+#[test]
+fn receiver_resolutions_are_stamped() {
+    let a = run(vec![(
+        "m/Main.java",
+        "package m;\nclass Logger { int log() { return 1; } }\nclass Main {\n  int use(Logger lg) { return lg.log(); }\n}\n",
+    )]);
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.src == "m.Main.use" && e.dst == "m.Logger.log")
+        .expect("edge");
+    assert_eq!(
+        e.props.get("_resolved_by").and_then(|v| v.as_str()),
+        Some("receiver")
+    );
+}
