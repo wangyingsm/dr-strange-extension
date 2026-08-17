@@ -71,6 +71,38 @@ type Call struct {
 	Line   int    `json:"line,omitempty"`
 }
 
+// Hint records how a body (or the package scope) binds a name to a type the
+// source declares — the deterministic inputs receiver typing reads. Caller is
+// "" for package-level vars, whose scope is the whole package. Exactly one of
+// TypeName (a declared/annotated/composite-literal type) or CallName (an
+// initializer call whose declared return names the type) is set; the Alias
+// fields carry the package qualifier as written.
+type Hint struct {
+	Caller    string `json:"caller,omitempty"`
+	Name      string `json:"name"`
+	TypeAlias string `json:"type_alias,omitempty"`
+	TypeName  string `json:"type_name,omitempty"`
+	CallAlias string `json:"call_alias,omitempty"`
+	CallName  string `json:"call_name,omitempty"`
+}
+
+// Ret records a callable's first result type when it is a plain named type
+// (possibly pointered/qualified) — what types `x := f()`.
+type Ret struct {
+	Recv      string `json:"recv,omitempty"`
+	Name      string `json:"name"`
+	TypeAlias string `json:"type_alias,omitempty"`
+	TypeName  string `json:"type_name"`
+}
+
+// Embed records a struct's embedded field, for method-set promotion: a call
+// on the outer type may resolve to a method the embedded type declares.
+type Embed struct {
+	TypeName   string `json:"type_name"`
+	FieldAlias string `json:"field_alias,omitempty"`
+	FieldName  string `json:"field_name"`
+}
+
 // Import is one import declaration. Alias is as written ("" when the default
 // name is used) — a list, not a map, because two blank imports may coexist.
 type Import struct {
@@ -118,6 +150,9 @@ type FileFacts struct {
 	Imports []Import `json:"imports,omitempty"`
 	Ifaces  []Iface  `json:"ifaces,omitempty"`
 	Methods []Method `json:"methods,omitempty"`
+	Hints   []Hint   `json:"hints,omitempty"`
+	Returns []Ret    `json:"returns,omitempty"`
+	Embeds  []Embed  `json:"embeds,omitempty"`
 	// Call sites too dynamic to name at all — `f()()`, chained selectors —
 	// counted so the notes can account for them.
 	Opaque int `json:"opaque,omitempty"`
@@ -325,6 +360,34 @@ func (w *walker) funcDecl(d *ast.FuncDecl) {
 	}
 	w.node(parent, key, label, props, w.line(d))
 	w.calls(key, d.Body)
+
+	// Receiver-typing inputs: the declared first result (what `x := f()`
+	// makes x), the typed parameters, and the body's own stated bindings.
+	if d.Type.Results != nil && len(d.Type.Results.List) > 0 {
+		if alias, tname, ok := typeRef(d.Type.Results.List[0].Type); ok {
+			recv := ""
+			if label == "Method" {
+				recv = receiverBase(d.Recv.List[0].Type)
+			}
+			w.facts.Returns = append(w.facts.Returns, Ret{
+				Recv: recv, Name: name, TypeAlias: alias, TypeName: tname,
+			})
+		}
+	}
+	if d.Type.Params != nil {
+		for _, field := range d.Type.Params.List {
+			alias, tname, ok := typeRef(field.Type)
+			if !ok {
+				continue
+			}
+			for _, id := range field.Names {
+				if id.Name != "_" {
+					w.hint(Hint{Caller: key, Name: id.Name, TypeAlias: alias, TypeName: tname})
+				}
+			}
+		}
+	}
+	w.hints(key, d.Body)
 }
 
 func (w *walker) genDecl(d *ast.GenDecl) {
@@ -364,6 +427,16 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 
 	switch t := s.Type.(type) {
 	case *ast.StructType:
+		for _, field := range t.Fields.List {
+			if len(field.Names) != 0 {
+				continue // named fields are described, not embedded
+			}
+			if alias, fname, ok := typeRef(field.Type); ok {
+				w.facts.Embeds = append(w.facts.Embeds, Embed{
+					TypeName: name, FieldAlias: alias, FieldName: fname,
+				})
+			}
+		}
 		props := w.props("", doc, name)
 		if fields := w.fieldList(t.Fields); len(fields) > 0 {
 			props["fields"] = map[string]any{
@@ -429,6 +502,25 @@ func (w *walker) typeSpec(d *ast.GenDecl, s *ast.TypeSpec) {
 // as written under `value` — never evaluated, because `256 * 1024` folded
 // wrongly is worse than the expression that produced it.
 func (w *walker) valueSpec(d *ast.GenDecl, s *ast.ValueSpec, values []ast.Expr, typ ast.Expr) {
+	// A package-level var's stated type or initializer types it for every
+	// function in the package (Caller "" = package scope). Consts are basic
+	// values and carry no method sets worth hinting.
+	if d.Tok == token.VAR {
+		for i, id := range s.Names {
+			if id.Name == "_" {
+				continue
+			}
+			if typ != nil {
+				if alias, tname, ok := typeRef(typ); ok {
+					w.hint(Hint{Name: id.Name, TypeAlias: alias, TypeName: tname})
+				}
+			} else if i < len(values) {
+				if h, ok := initHint("", id.Name, values[i]); ok {
+					w.hint(h)
+				}
+			}
+		}
+	}
 	label := "Var"
 	if d.Tok == token.CONST {
 		label = "Const"
@@ -483,6 +575,118 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 			}
 		default:
 			w.facts.Opaque++
+		}
+		return true
+	})
+}
+
+// typeRef reads a type expression down to a plain named type — through
+// pointers and generic instantiations, never through slices, maps, channels
+// or funcs, whose methods belong to other types entirely.
+func typeRef(e ast.Expr) (alias, name string, ok bool) {
+	switch t := e.(type) {
+	case *ast.StarExpr:
+		return typeRef(t.X)
+	case *ast.IndexExpr:
+		return typeRef(t.X)
+	case *ast.IndexListExpr:
+		return typeRef(t.X)
+	case *ast.Ident:
+		return "", t.Name, true
+	case *ast.SelectorExpr:
+		if x, ok := t.X.(*ast.Ident); ok {
+			return x.Name, t.Sel.Name, true
+		}
+	}
+	return "", "", false
+}
+
+// initHint reads an initializer expression: a composite literal names its
+// type outright, a call names a function whose declared return will. Anything
+// else is a checker's job and yields nothing.
+func initHint(caller, name string, e ast.Expr) (Hint, bool) {
+	switch v := e.(type) {
+	case *ast.UnaryExpr:
+		if v.Op == token.AND {
+			return initHint(caller, name, v.X)
+		}
+	case *ast.CompositeLit:
+		if v.Type != nil {
+			if alias, tname, ok := typeRef(v.Type); ok {
+				return Hint{Caller: caller, Name: name, TypeAlias: alias, TypeName: tname}, true
+			}
+		}
+	case *ast.CallExpr:
+		switch fn := v.Fun.(type) {
+		case *ast.Ident:
+			return Hint{Caller: caller, Name: name, CallName: fn.Name}, true
+		case *ast.SelectorExpr:
+			if x, ok := fn.X.(*ast.Ident); ok {
+				return Hint{Caller: caller, Name: name, CallAlias: x.Name, CallName: fn.Sel.Name}, true
+			}
+		}
+	}
+	return Hint{}, false
+}
+
+// hint records a binding, first writing wins — the calls it might type were
+// themselves kept at their first site.
+func (w *walker) hint(h Hint) {
+	for _, have := range w.facts.Hints {
+		if have.Caller == h.Caller && have.Name == h.Name {
+			return
+		}
+	}
+	w.facts.Hints = append(w.facts.Hints, h)
+}
+
+// hints walks a body for the locals whose type the source states: typed
+// `var` declarations, `:=` with a composite-literal or call initializer —
+// the first value of a multi-assign takes the call's first result.
+func (w *walker) hints(caller string, body *ast.BlockStmt) {
+	if body == nil {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch st := n.(type) {
+		case *ast.AssignStmt:
+			if st.Tok != token.DEFINE || len(st.Lhs) == 0 {
+				return true
+			}
+			first, ok := st.Lhs[0].(*ast.Ident)
+			if !ok || first.Name == "_" {
+				return true
+			}
+			if len(st.Rhs) >= 1 {
+				if h, ok := initHint(caller, first.Name, st.Rhs[0]); ok {
+					w.hint(h)
+				}
+			}
+		case *ast.DeclStmt:
+			gd, ok := st.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for i, id := range vs.Names {
+					if id.Name == "_" {
+						continue
+					}
+					if vs.Type != nil {
+						if alias, tname, ok := typeRef(vs.Type); ok {
+							w.hint(Hint{Caller: caller, Name: id.Name, TypeAlias: alias, TypeName: tname})
+						}
+					} else if i < len(vs.Values) {
+						if h, ok := initHint(caller, id.Name, vs.Values[i]); ok {
+							w.hint(h)
+						}
+					}
+				}
+			}
 		}
 		return true
 	})

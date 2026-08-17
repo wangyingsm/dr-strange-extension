@@ -212,14 +212,27 @@ func TestExternalCallsBecomeStandIns(t *testing.T) {
 
 // A method call on a value names no package, and the receiver's type is what
 // a parser cannot know — counted, not guessed.
-func TestMethodCallsAreCountedUnresolved(t *testing.T) {
+func TestMethodCallsResolveWhenTypedAndLedgerWhenNot(t *testing.T) {
 	a := run(t, mapFiles{files: map[string]string{
-		"go.mod":  "module m",
-		"main.go": "package main\n\nfunc main() { var b builder; b.run() }\n\ntype builder struct{}\n\nfunc (b builder) run() {}\n",
+		"go.mod": "module m",
+		"main.go": "package main\n\nfunc main() { var b builder; b.run(); x := opaque(); x.mystery() }\n\n" +
+			"type builder struct{}\n\nfunc (b builder) run() {}\n",
 	}})
+	// `var b builder` states the type: the call resolves — no longer a guess.
+	if !hasEdge(a, "m.main", "CALLS", "m.builder.run") {
+		t.Fatalf("a var-typed receiver call resolves: %v", a.Edges)
+	}
+	// `x := opaque()` names a callable this tree never declares: the call is
+	// shown as an UnresolvedRef with its reason, and counted in the notes.
 	noteContaining(t, a, "left unresolved")
-	if hasEdge(a, "m.main", "CALLS", "m.builder.run") {
-		t.Fatal("a receiver call must not be guessed into an edge")
+	var ledgered bool
+	for _, n := range a.Nodes {
+		if n.Label == "UnresolvedRef" && strings.Contains(n.Key, "x.mystery") {
+			ledgered = true
+		}
+	}
+	if !ledgered {
+		t.Fatalf("an untypeable receiver call is a queryable UnresolvedRef: %v", a.Nodes)
 	}
 }
 
