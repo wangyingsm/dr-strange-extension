@@ -674,3 +674,163 @@ fn a_lazy_require_is_an_import() {
         );
     }
 }
+
+// ---- baseline Tier B: receiver typing, inheritance, super, field chains --
+// (mined from codegraph + codebase-memory-mcp ts/tsx resolution suites)
+
+/// An annotated parameter names the receiver's class — and two same-named
+/// methods never cross-attribute.
+#[test]
+fn annotated_params_type_receivers_without_crossing() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "svc.ts",
+            "export class Logger { log(): number { return 1; } }\nexport class Other { log(): number { return 2; } }\nexport function use(lg: Logger): number { return lg.log(); }\nexport function useOther(o: Other): number { return o.log(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/svc.use", "CALLS", "p/svc.Logger.log"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "p/svc.useOther", "CALLS", "p/svc.Other.log"));
+    assert!(!has_edge(&a, "p/svc.use", "CALLS", "p/svc.Other.log"));
+    assert!(!has_edge(&a, "p/svc.useOther", "CALLS", "p/svc.Logger.log"));
+}
+
+/// `const lg = new Logger()` types the local; so does an annotated const.
+#[test]
+fn new_and_annotations_type_locals() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Logger { log(): number { return 1; } }\nexport function use(): number { const lg = new Logger(); return lg.log(); }\nexport function useAnn(l: Logger): number { const x: Logger = l; return x.log(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/m.use", "CALLS", "p/m.Logger.log"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "p/m.useAnn", "CALLS", "p/m.Logger.log"));
+}
+
+/// A factory's declared return types the value — and `await make()` unwraps
+/// `Promise<T>` to the same class, cross-file through the import.
+#[test]
+fn declared_returns_type_factory_results() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "lib.ts",
+            "export class Conn { ping(): number { return 1; } }\nexport function open(): Conn { return new Conn(); }\nexport async function connect(): Promise<Conn> { return new Conn(); }\n",
+        ),
+        (
+            "app.ts",
+            "import { open, connect } from './lib';\nexport function go(): number { const c = open(); return c.ping(); }\nexport async function goAsync(): Promise<number> { const c = await connect(); return c.ping(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/app.go", "CALLS", "p/lib.Conn.ping"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "p/app.goAsync", "CALLS", "p/lib.Conn.ping"));
+}
+
+/// `this.m()` walks the extends chain; a method on the base resolves from
+/// the subclass — and instance dispatch through a typed param does too.
+#[test]
+fn inheritance_walks_the_extends_chain() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Animal { breathe(): number { return 1; } }\nexport class Dog extends Animal { bark(): number { return this.breathe(); } }\nexport function walk(d: Dog): number { return d.breathe(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/m.Dog.bark", "CALLS", "p/m.Animal.breathe"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "p/m.walk", "CALLS", "p/m.Animal.breathe"));
+}
+
+/// `super.run()` starts at the bases — never the own class, even when it
+/// overrides the name.
+#[test]
+fn super_calls_resolve_on_the_base() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Base { run(): number { return 1; } }\nexport class Child extends Base { run(): number { return super.run(); } }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/m.Child.run", "CALLS", "p/m.Base.run"),
+        "{:?}",
+        a.edges
+    );
+    assert!(!has_edge(&a, "p/m.Child.run", "CALLS", "p/m.Child.run"));
+}
+
+/// A class receiver reaches static methods: `Util.helper()`.
+#[test]
+fn class_receivers_reach_statics() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Util { static helper(): number { return 1; } }\nexport function use(): number { return Util.helper(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/m.use", "CALLS", "p/m.Util.helper"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// `this.logger.log()` resolves through the declared property's class; a
+/// one-hop field chain on a typed local (`o.tool.fire()`) resolves too.
+#[test]
+fn declared_properties_type_field_chains() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Logger { log(): number { return 1; } }\nexport class Tool { fire(): number { return 2; } }\nexport class App {\n  logger: Logger = new Logger();\n  tool = new Tool();\n  render(): number { return this.logger.log(); }\n}\nexport function run(app: App): number { return app.tool.fire(); }\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "p/m.App.render", "CALLS", "p/m.Logger.log"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "p/m.run", "CALLS", "p/m.Tool.fire"));
+}
+
+/// The typed paths carry stamps naming the strategy that bound them.
+#[test]
+fn receiver_resolutions_are_stamped() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "m.ts",
+            "export class Logger { log(): number { return 1; } }\nexport function use(lg: Logger): number { return lg.log(); }\n",
+        ),
+    ]));
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.src == "p/m.use" && e.dst == "p/m.Logger.log")
+        .expect("edge");
+    assert_eq!(
+        e.props.get("_resolved_by").and_then(|v| v.as_str()),
+        Some("receiver")
+    );
+}

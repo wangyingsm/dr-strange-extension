@@ -283,6 +283,127 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
+    // ---- receiver-typing indexes (annotations, new, factories, bases) -----
+    // A lightweight resolver for TYPE names only — no externals minted: a
+    // class outside this tree contributes no methods anyway.
+    let classes: BTreeSet<String> = all.iter().flat_map(|f| f.classes.iter().cloned()).collect();
+    let type_decl =
+        |f: &FileFacts, bindings: &BTreeMap<&str, (&str, &str)>, written: &str| -> Option<String> {
+            match written.split_once('.') {
+                None => {
+                    if let Some((key, _)) = ix.decls.get(&f.module_id).and_then(|d| d.get(written))
+                    {
+                        return Some(key.clone());
+                    }
+                    let (imported, spec) = bindings.get(written)?;
+                    if *imported == "*" {
+                        return None;
+                    }
+                    match ix.resolve_spec(&f.file, spec) {
+                        Resolved::Module(target) => {
+                            let name = if *imported == "default" {
+                                "default"
+                            } else {
+                                imported
+                            };
+                            ix.lookup_export(&target, name, 0)
+                        }
+                        _ => None,
+                    }
+                }
+                Some((ns, name)) => {
+                    let (imported, spec) = bindings.get(ns)?;
+                    if *imported != "*" {
+                        return None;
+                    }
+                    match ix.resolve_spec(&f.file, spec) {
+                        Resolved::Module(target) => ix.lookup_export(&target, name, 0),
+                        _ => None,
+                    }
+                }
+            }
+        };
+    fn file_bindings(f: &FileFacts) -> BTreeMap<&str, (&str, &str)> {
+        f.bindings
+            .iter()
+            .map(|b| {
+                (
+                    b.local.as_str(),
+                    (b.imported.as_str(), b.specifier.as_str()),
+                )
+            })
+            .collect()
+    }
+    // Declared returns first: a constructed hint may type through a factory.
+    let mut returns_ix: BTreeMap<String, String> = BTreeMap::new();
+    let mut bases_ix: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for (fn_key, written) in &f.returns {
+            if let Some(key) = type_decl(f, &bindings, written)
+                && classes.contains(&key)
+            {
+                returns_ix.entry(fn_key.clone()).or_insert(key);
+            }
+        }
+        for (class_key, written, ty, _) in &f.clauses {
+            if ty == "EXTENDS"
+                && let Some(key) = type_decl(f, &bindings, written)
+                && classes.contains(&key)
+            {
+                bases_ix.entry(class_key.clone()).or_default().push(key);
+            }
+        }
+    }
+    let mut hint_ix: BTreeMap<(String, String), String> = BTreeMap::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for h in &f.hints {
+            let resolved = type_decl(f, &bindings, &h.written);
+            let class = match resolved {
+                Some(key) if classes.contains(&key) => Some(key),
+                Some(key) if h.constructed => returns_ix.get(&key).cloned(),
+                _ => None,
+            };
+            if let Some(class) = class {
+                hint_ix
+                    .entry((h.caller.clone(), h.name.clone()))
+                    .or_insert(class);
+            }
+        }
+    }
+    // The method a class answers `name` with: its own, else the base
+    // chain's, depth-capped.
+    fn method_walk(
+        methods: &BTreeMap<String, BTreeSet<String>>,
+        bases: &BTreeMap<String, Vec<String>>,
+        class: &str,
+        name: &str,
+        depth: usize,
+    ) -> Option<String> {
+        if depth == 0 {
+            return None;
+        }
+        if methods.get(class).is_some_and(|ms| ms.contains(name)) {
+            return Some(format!("{class}.{name}"));
+        }
+        bases
+            .get(class)
+            .into_iter()
+            .flatten()
+            .find_map(|b| method_walk(methods, bases, b, name, depth - 1))
+    }
+    // A resolution stamp for the typed paths, matching the family shape.
+    let stamped = |src: &str, dst: &str, line: u64, strategy: &str, written: &str| -> Edge {
+        let mut e = edge_at(src, dst, "CALLS", line);
+        e.props
+            .insert("_resolved_by".into(), Value::String(strategy.into()));
+        e.props
+            .insert("_confidence".into(), Value::String("high".into()));
+        e.props.insert("_ref".into(), Value::String(written.into()));
+        e
+    };
+
     // ---- calls and clauses -------------------------------------------------
     let mut unresolved = 0usize;
     let mut external_calls = 0usize;
@@ -352,8 +473,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     }
                 }
                 CallKind::Qualified(obj) => match bindings.get(obj.as_str()) {
-                    // Only a namespace import makes `obj.name` resolvable; any
-                    // other object is a value whose type a checker would know.
+                    // A namespace import makes `obj.name` resolvable outright.
                     Some(("*", spec)) => match ix.resolve_spec(&f.file, spec) {
                         Resolved::Module(target) => match ix.lookup_export(&target, &c.name, 0) {
                             Some(key) => add_edge(
@@ -376,23 +496,106 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                         }
                         Resolved::Miss => unresolved += 1,
                     },
-                    _ => unresolved += 1,
+                    // Otherwise two declared readings remain: a typed
+                    // receiver (annotation, `new`, factory), or a class
+                    // receiver (`Util.helper()`, statics included).
+                    _ => {
+                        let written = format!("{obj}.{}", c.name);
+                        let receiver = hint_ix
+                            .get(&(c.caller.clone(), obj.clone()))
+                            .and_then(|class| {
+                                method_walk(&ix.class_methods, &bases_ix, class, &c.name, 5)
+                                    .map(|k| (k, "receiver"))
+                            })
+                            .or_else(|| {
+                                let class = type_decl(f, &bindings, obj)?;
+                                classes.contains(&class).then_some(())?;
+                                method_walk(&ix.class_methods, &bases_ix, &class, &c.name, 5)
+                                    .map(|k| (k, "class"))
+                            });
+                        match receiver {
+                            Some((key, how)) => add_edge(
+                                &mut pending_edges,
+                                &mut edge_set,
+                                stamped(&c.caller, &key, c.line, how, &written),
+                            ),
+                            None => unresolved += 1,
+                        }
+                    }
                 },
                 CallKind::This(class) => {
                     let class_key = format!("{}.{class}", f.module_id);
-                    if ix
-                        .class_methods
-                        .get(&class_key)
-                        .is_some_and(|ms| ms.contains(&c.name))
-                    {
-                        let key = format!("{class_key}.{}", c.name);
-                        add_edge(
+                    match method_walk(&ix.class_methods, &bases_ix, &class_key, &c.name, 5) {
+                        Some(key) => add_edge(
                             &mut pending_edges,
                             &mut edge_set,
                             edge_at(&c.caller, &key, "CALLS", c.line),
-                        );
-                    } else {
-                        unresolved += 1;
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::Super(class) => {
+                    // The bases only: `super.m()` never lands on the own
+                    // class, even when it overrides the name.
+                    let class_key = format!("{}.{class}", f.module_id);
+                    let hit = bases_ix
+                        .get(&class_key)
+                        .into_iter()
+                        .flatten()
+                        .find_map(|b| method_walk(&ix.class_methods, &bases_ix, b, &c.name, 5));
+                    match hit {
+                        Some(key) => add_edge(
+                            &mut pending_edges,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &key,
+                                c.line,
+                                "super",
+                                &format!("super.{}", c.name),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::SelfAttr { class, attr } => {
+                    let class_key = format!("{}.{class}", f.module_id);
+                    let hit = hint_ix
+                        .get(&(class_key, attr.clone()))
+                        .and_then(|t| method_walk(&ix.class_methods, &bases_ix, t, &c.name, 5));
+                    match hit {
+                        Some(key) => add_edge(
+                            &mut pending_edges,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &key,
+                                c.line,
+                                "self-attr",
+                                &format!("this.{attr}.{}", c.name),
+                            ),
+                        ),
+                        None => unresolved += 1,
+                    }
+                }
+                CallKind::FieldChain { obj, field } => {
+                    let hit = hint_ix
+                        .get(&(c.caller.clone(), obj.clone()))
+                        .and_then(|t1| hint_ix.get(&(t1.clone(), field.clone())))
+                        .and_then(|t2| method_walk(&ix.class_methods, &bases_ix, t2, &c.name, 5));
+                    match hit {
+                        Some(key) => add_edge(
+                            &mut pending_edges,
+                            &mut edge_set,
+                            stamped(
+                                &c.caller,
+                                &key,
+                                c.line,
+                                "receiver",
+                                &format!("{obj}.{field}.{}", c.name),
+                            ),
+                        ),
+                        None => unresolved += 1,
                     }
                 }
             }

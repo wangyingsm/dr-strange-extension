@@ -82,6 +82,28 @@ pub enum CallKind {
     This(String),
     /// `new Foo()` — instantiation is a call to the class.
     New,
+    /// `super.m()` inside a class body — resolved over the base chain only.
+    Super(String),
+    /// `this.attr.m()` — resolvable when the class states `attr`'s class.
+    SelfAttr { class: String, attr: String },
+    /// `o.field.m()` — resolvable when both the local and the field have
+    /// stated classes.
+    FieldChain { obj: String, field: String },
+}
+
+/// How a name is bound to a class the source states — an annotation, a
+/// `new` expression, or a factory call whose declared return names it.
+/// `caller` is a function key for params and locals, a CLASS key for
+/// declared properties (`this.name`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hint {
+    pub caller: String,
+    pub name: String,
+    /// The class as written — `Foo`, or `ns.Foo` through a namespace import.
+    pub written: String,
+    /// True when `written` was a plain call (`open()`): a factory whose
+    /// declared return types the value.
+    pub constructed: bool,
 }
 
 /// One imported binding: `import { a as b } from './x'` binds `b`.
@@ -148,6 +170,14 @@ pub struct FileFacts {
     pub clauses: Vec<(String, String, String, u64)>,
     /// Call sites too dynamic to name at all.
     pub opaque: usize,
+    /// The classes this file declares, by key.
+    pub classes: Vec<String>,
+    /// Type bindings the source states (annotations, `new`, factories).
+    pub hints: Vec<Hint>,
+    /// `(callable key, declared return as written)` when it names a plain
+    /// class — `Promise<T>` unwraps to `T`, which is what an async factory
+    /// hands the awaiter.
+    pub returns: Vec<(String, String)>,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -696,6 +726,122 @@ impl Walker<'_> {
         }
     }
 
+    /// A written type usable by receiver typing: a plain identifier or a
+    /// one-level qualified name (`ns.Foo`). Generics and unions are a
+    /// checker's business — except `Promise<T>`, whose `T` is what an
+    /// async factory hands the awaiter.
+    fn type_written(t: &ast::TsType) -> Option<String> {
+        let ast::TsType::TsTypeRef(r) = t else {
+            return None;
+        };
+        let name = match &r.type_name {
+            ast::TsEntityName::Ident(i) => i.sym.to_string(),
+            ast::TsEntityName::TsQualifiedName(q) => {
+                let ast::TsEntityName::Ident(l) = &q.left else {
+                    return None;
+                };
+                format!("{}.{}", l.sym, q.right.sym)
+            }
+        };
+        match &r.type_params {
+            Some(args) if name == "Promise" && args.params.len() == 1 => {
+                Self::type_written(&args.params[0])
+            }
+            Some(_) => None,
+            None => Some(name),
+        }
+    }
+
+    fn hint(&mut self, caller: &str, name: String, written: String, constructed: bool) {
+        if !self
+            .facts
+            .hints
+            .iter()
+            .any(|h| h.caller == caller && h.name == name)
+        {
+            self.facts.hints.push(Hint {
+                caller: caller.to_string(),
+                name,
+                written,
+                constructed,
+            });
+        }
+    }
+
+    /// Receiver-typing inputs of one callable: annotated parameters, the
+    /// declared return, and the body's stated bindings (`const x: T`,
+    /// `const x = new T()`, `const x = make()`).
+    fn fn_hints(&mut self, caller: &str, f: &ast::Function) {
+        for param in &f.params {
+            if let ast::Pat::Ident(b) = &param.pat
+                && let Some(ann) = &b.type_ann
+                && let Some(written) = Self::type_written(&ann.type_ann)
+            {
+                self.hint(caller, b.id.sym.to_string(), written, false);
+            }
+        }
+        if let Some(ret) = &f.return_type
+            && let Some(written) = Self::type_written(&ret.type_ann)
+        {
+            self.facts.returns.push((caller.to_string(), written));
+        }
+        if let Some(body) = &f.body {
+            self.body_hints(caller, body);
+        }
+    }
+
+    fn body_hints(&mut self, caller: &str, body: &ast::BlockStmt) {
+        struct Vars<'a, 'b, 'c> {
+            walker: &'a mut Walker<'c>,
+            caller: &'b str,
+        }
+        impl Visit for Vars<'_, '_, '_> {
+            fn visit_var_decl(&mut self, node: &ast::VarDecl) {
+                for d in &node.decls {
+                    let ast::Pat::Ident(b) = &d.name else {
+                        continue;
+                    };
+                    let name = b.id.sym.to_string();
+                    if let Some(ann) = &b.type_ann {
+                        if let Some(written) = Walker::type_written(&ann.type_ann) {
+                            self.walker.hint(self.caller, name, written, false);
+                        }
+                        continue;
+                    }
+                    match d.init.as_deref() {
+                        Some(ast::Expr::New(n)) => {
+                            if let ast::Expr::Ident(i) = &*n.callee {
+                                self.walker
+                                    .hint(self.caller, name, i.sym.to_string(), false);
+                            }
+                        }
+                        Some(ast::Expr::Await(a)) => {
+                            if let ast::Expr::Call(c) = &*a.arg
+                                && let ast::Callee::Expr(e) = &c.callee
+                                && let ast::Expr::Ident(i) = &**e
+                            {
+                                self.walker.hint(self.caller, name, i.sym.to_string(), true);
+                            }
+                        }
+                        Some(ast::Expr::Call(c)) => {
+                            if let ast::Callee::Expr(e) = &c.callee
+                                && let ast::Expr::Ident(i) = &**e
+                            {
+                                self.walker.hint(self.caller, name, i.sym.to_string(), true);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                node.visit_children_with(self);
+            }
+        }
+        body.visit_with(&mut Vars {
+            walker: self,
+            caller,
+        });
+    }
+
     fn function(
         &mut self,
         name: &str,
@@ -734,6 +880,7 @@ impl Walker<'_> {
         if let Some(body) = &f.body {
             self.collect_calls(&key, body, None);
         }
+        self.fn_hints(&key, f);
     }
 
     fn var(&mut self, v: &ast::VarDecl, exported: bool, outer: Option<Span>) {
@@ -863,6 +1010,7 @@ impl Walker<'_> {
             props.insert("visibility".into(), Value::String("exported".into()));
         }
 
+        self.facts.classes.push(key.clone());
         // Fields as the Rust parser writes them: `name: type` in declaration
         // order, a list rather than a map.
         let mut fields: Vec<Value> = Vec::new();
@@ -872,8 +1020,18 @@ impl Walker<'_> {
             {
                 let entry = match &p.type_ann {
                     Some(t) => format!("{n}: {}", self.snippet(t.type_ann.span())),
-                    None => n,
+                    None => n.clone(),
                 };
+                // A declared property's class types `this.n.m()` chains.
+                if let Some(t) = &p.type_ann
+                    && let Some(written) = Self::type_written(&t.type_ann)
+                {
+                    self.hint(&key, n.clone(), written, false);
+                } else if let Some(ast::Expr::New(nw)) = p.value.as_deref()
+                    && let ast::Expr::Ident(i) = &*nw.callee
+                {
+                    self.hint(&key, n.clone(), i.sym.to_string(), false);
+                }
                 fields.push(Value::String(entry));
             }
         }
@@ -996,6 +1154,7 @@ impl Walker<'_> {
         if let Some(body) = &f.body {
             self.collect_calls(&mkey, body, Some((class_name, class_key)));
         }
+        self.fn_hints(&mkey, f);
     }
 
     fn interface(&mut self, i: &ast::TsInterfaceDecl, exported: bool, doc_span: Span) {
@@ -1363,7 +1522,40 @@ impl Visit for CallCollector<'_, '_> {
                                 self.walker.facts.opaque += 1;
                             }
                         }
+                        // One field hop: `this.attr.m()` when the class
+                        // states `attr`, `o.field.m()` when both hops are
+                        // stated. Deeper chains stay opaque.
+                        (ast::Expr::Member(inner), Some(name)) => {
+                            let field = inner.prop.as_ident().map(|p| p.sym.to_string());
+                            match (&*inner.obj, field, &self.in_class) {
+                                (ast::Expr::This(_), Some(attr), Some(class)) => self.push(
+                                    CallKind::SelfAttr {
+                                        class: class.clone(),
+                                        attr,
+                                    },
+                                    name,
+                                    node.span,
+                                ),
+                                (ast::Expr::Ident(obj), Some(field), _) => self.push(
+                                    CallKind::FieldChain {
+                                        obj: obj.sym.to_string(),
+                                        field,
+                                    },
+                                    name,
+                                    node.span,
+                                ),
+                                _ => self.walker.facts.opaque += 1,
+                            }
+                        }
                         _ => self.walker.facts.opaque += 1,
+                    }
+                }
+                // `super.m()` — the base chain's method, never the own class.
+                ast::Expr::SuperProp(sp) => {
+                    if let (ast::SuperProp::Ident(i), Some(class)) = (&sp.prop, &self.in_class) {
+                        self.push(CallKind::Super(class.clone()), i.sym.to_string(), node.span);
+                    } else {
+                        self.walker.facts.opaque += 1;
                     }
                 }
                 _ => self.walker.facts.opaque += 1,
