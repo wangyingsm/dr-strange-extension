@@ -90,9 +90,24 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+        # Idempotent: a rerun (or a race with an already-published release)
+        # completes missing assets instead of failing on the existing
+        # release — and never clobbers an asset already up there, because
+        # installed drsg catalogs pin the published bytes by sha256.
         run: |
           plugin="${{ steps.meta.outputs.plugin }}"
           sha=$(cut -d' ' -f1 "dist/$plugin.wasm.sha256")
+          if existing=$(gh release view "$GITHUB_REF_NAME" --json assets -q '.assets[].name' 2>/dev/null); then
+            echo "release $GITHUB_REF_NAME already exists — completing missing assets only"
+            for f in "$plugin.wasm" "$plugin.wasm.sha256"; do
+              if printf '%s\n' "$existing" | grep -qx "$f"; then
+                echo "asset $f already published; leaving it untouched"
+              else
+                gh release upload "$GITHUB_REF_NAME" "dist/$f"
+              fi
+            done
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" \
             "dist/$plugin.wasm" "dist/$plugin.wasm.sha256" \
             --title "$GITHUB_REF_NAME" \

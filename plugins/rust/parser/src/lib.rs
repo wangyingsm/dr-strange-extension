@@ -1644,7 +1644,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // gap): resolve where each closure went, read the `Fn(...)` types its
     // signature states, and hand them to the caller's locals — computed
     // against a first Typing view, merged, then the view rebuilt.
-    {
+    let derived: Vec<((String, String), LocalHint)> = {
         let typing = Typing {
             declared: &declared,
             fns: &fns,
@@ -1657,7 +1657,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             impls_of: &impls_of,
             trait_impl_methods: &trait_impl_methods,
         };
-        let mut derived: Vec<((String, String), LocalHint)> = Vec::new();
+        let mut derived = Vec::new();
         for (caller, callee, idx, params) in &pending_closures {
             let module = scopes.get(caller).cloned().unwrap_or_default();
             let fn_key = match callee {
@@ -1692,10 +1692,10 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 }
             }
         }
-        drop(typing);
-        for (key, hint) in derived {
-            local_inits.entry(key).or_insert(hint);
-        }
+        derived
+    };
+    for (key, hint) in derived {
+        local_inits.entry(key).or_insert(hint);
     }
 
     let typing = Typing {
