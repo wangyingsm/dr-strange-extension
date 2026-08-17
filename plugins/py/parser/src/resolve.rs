@@ -636,13 +636,12 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             if BUILTINS.contains(&name.as_str()) {
                 continue;
             }
-            let target =
-                match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
-                    Some((key, is_value)) if !*is_value => Some(key.clone()),
-                    _ => bindings
-                        .get(name)
-                        .and_then(|(t, m)| if m.is_empty() { None } else { ix.decl(t, m) }),
-                };
+            let target = match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
+                Some((key, is_value)) if !*is_value => Some(key.clone()),
+                _ => bindings
+                    .get(name)
+                    .and_then(|(t, m)| if m.is_empty() { None } else { ix.decl(t, m) }),
+            };
             let Some(target) = target else { continue };
             if target == *caller || !seen.contains(&target) {
                 continue;
