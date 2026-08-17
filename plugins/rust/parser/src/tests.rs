@@ -1539,3 +1539,121 @@ fn receiver_chain_through_wrapped_returns_resolves_method_calls() {
             .collect::<Vec<_>>()
     );
 }
+
+// ---- baseline ports: cases mined from codegraph + codebase-memory-mcp ----
+// (scratchpad/baseline/*.md holds the full inventories and the gap matrix.)
+
+/// codegraph: `users::router()` in a parent module resolves SELF-relative to
+/// the child module's fn — and a colliding leaf name never crosses files.
+#[test]
+fn self_relative_submodule_calls_disambiguate_colliding_leaves() {
+    let t = Tree::new("bl-selfrel");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n")
+        .write("src/lib.rs", "pub mod http;\n")
+        .write(
+            "src/http/mod.rs",
+            "pub mod users;\npub mod profiles;\npub fn api_router() { users::router(); profiles::router(); }\n",
+        )
+        .write("src/http/users.rs", "pub fn router() -> i32 { 1 }\n")
+        .write("src/http/profiles.rs", "pub fn router() -> i32 { 2 }\n");
+    let a = run(&t);
+    assert!(has_edge(
+        &a,
+        "k::http::api_router",
+        "CALLS",
+        "k::http::users::router"
+    ));
+    assert!(has_edge(
+        &a,
+        "k::http::api_router",
+        "CALLS",
+        "k::http::profiles::router"
+    ));
+}
+
+/// codegraph: a 3-segment path through an imported module reaches the leaf.
+#[test]
+fn three_segment_path_through_imported_module_resolves() {
+    let t = Tree::new("bl-3seg");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n")
+        .write("src/lib.rs", "pub mod routes;\npub mod database;\n")
+        .write("src/database/mod.rs", "pub mod profiles;\n")
+        .write("src/database/profiles.rs", "pub fn find(id: i32) -> i32 { id }\n")
+        .write(
+            "src/routes/mod.rs",
+            "use crate::database;\npub fn get_profile(id: i32) -> i32 { database::profiles::find(id) }\n",
+        );
+    let a = run(&t);
+    assert!(has_edge(
+        &a,
+        "k::routes::get_profile",
+        "CALLS",
+        "k::database::profiles::find"
+    ));
+}
+
+/// codegraph: literal receivers (`"lit".len()`, `5.0f64.floor()`) must never
+/// bind to a same-named local method — they go to the ledger, not to a guess.
+#[test]
+fn literal_receivers_never_bind_to_local_methods() {
+    let t = Tree::new("bl-litrecv");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        "pub struct S;\nimpl S { pub fn len(&self) -> usize { 0 } }\npub fn run() { let _ = \"lit\".len(); let _ = 5.0f64.floor(); }\n",
+    );
+    let a = run(&t);
+    assert!(
+        !has_edge(&a, "k::run", "CALLS", "k::S::len"),
+        "a literal's method is not the local type's"
+    );
+}
+
+/// codegraph: a glob use emits no binding edges — it stays in the imports
+/// property as written, and never invents a target.
+#[test]
+fn glob_use_emits_no_import_edge() {
+    let t = Tree::new("bl-glob");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n")
+        .write("src/lib.rs", "pub mod a;\npub mod b;\n")
+        .write("src/a.rs", "pub fn thing() {}\n")
+        .write("src/b.rs", "use crate::a::*;\npub fn go() {}\n");
+    let a = run(&t);
+    assert!(
+        !a.edges.iter().any(|e| e.src == "k::b" && e.ty == "IMPORTS"),
+        "a glob names no single target"
+    );
+}
+
+/// cbm: qualified method call in UFCS position (`S::hi(&s)`) resolves to the
+/// declared method like any path call.
+#[test]
+fn ufcs_qualified_method_call_resolves() {
+    let t = Tree::new("bl-ufcs");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        "pub struct S;\nimpl S { pub fn hi(&self) -> i32 { 1 } }\npub fn run(s: &S) -> i32 { S::hi(s) }\n",
+    );
+    let a = run(&t);
+    assert!(has_edge(&a, "k::run", "CALLS", "k::S::hi"));
+}
+
+/// cbm/codegraph decoy discipline: two same-named methods, each caller typed
+/// by its parameter — exactly its own, never the other (Apple/Orange shape).
+#[test]
+fn typed_params_never_cross_attribute_same_named_methods() {
+    let t = Tree::new("bl-appleorange");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub struct Apple;\nimpl Apple { pub fn name(&self) -> i32 { 1 } }\n",
+            "pub struct Orange;\nimpl Orange { pub fn name(&self) -> i32 { 2 } }\n",
+            "pub fn pick_apple(a: &Apple) -> i32 { a.name() }\n",
+            "pub fn pick_orange(o: &Orange) -> i32 { o.name() }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(has_edge(&a, "k::pick_apple", "CALLS", "k::Apple::name"));
+    assert!(has_edge(&a, "k::pick_orange", "CALLS", "k::Orange::name"));
+    assert!(!has_edge(&a, "k::pick_apple", "CALLS", "k::Orange::name"));
+    assert!(!has_edge(&a, "k::pick_orange", "CALLS", "k::Apple::name"));
+}
