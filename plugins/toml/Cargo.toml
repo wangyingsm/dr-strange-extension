@@ -1,6 +1,6 @@
 [package]
 name = "drsg-plugin-toml"
-description = "A minimal dr-strange preprocessor plugin — proof the contract is implementable from the SDK alone"
+description = "A dr-strange preprocessor plugin for TOML — tables as nodes, pairs as written"
 version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 # is in, and the reason it is checked rather than assumed.
 [dependencies]
 dr-strange-ext = { path = "../../sdk/rust" }
+# Structure extraction: tables and pairs, values kept exactly as written.
+toml_edit = { version = "0.22", default-features = false, features = ["parse", "display"] }
 
 [workspace]
 members = []
