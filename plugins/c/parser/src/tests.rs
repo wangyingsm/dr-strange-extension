@@ -425,3 +425,96 @@ fn duplicate_definitions_stay_apart() {
     );
     note_containing(&a, "more than one file");
 }
+
+// ---- baseline Tier B: function-pointer bindings (mined from cbm) ---------
+
+/// `int (*fp)(int) = target;` — with and without `&` — binds the pointer;
+/// calls through it resolve to the function.
+#[test]
+fn fn_pointer_declarators_bind_calls() {
+    let a = run(vec![(
+        "m.c",
+        "int target_func(int x) { return x; }\nint decay(int v) {\n    int (*fp)(int) = target_func;\n    return fp(v);\n}\nint addressed(int v) {\n    int (*fp)(int) = &target_func;\n    return fp(v);\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.c::decay", "CALLS", "m.c::target_func"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "m.c::addressed", "CALLS", "m.c::target_func"));
+}
+
+/// A typedef'd pointer type changes nothing: the initializer names the
+/// function, and that is the fact.
+#[test]
+fn typedef_fn_pointers_bind_calls() {
+    let a = run(vec![(
+        "m.c",
+        "typedef int (*fn_t)(int);\nint real_func(int x) { return x; }\nint use_it(int v) {\n    fn_t f = real_func;\n    return f(v);\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.c::use_it", "CALLS", "m.c::real_func"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// Assignment after declaration binds too — `fp = compute; fp(42);`.
+#[test]
+fn fn_pointer_assignments_bind_calls() {
+    let a = run(vec![(
+        "m.c",
+        "int compute(int x) { return x; }\nint use_it(int v) {\n    int (*fp)(int);\n    fp = compute;\n    return fp(v);\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.c::use_it", "CALLS", "m.c::compute"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// cbm: struct-member slots assigned then invoked resolve — `vt.init =
+/// my_init; vt.init();` — through both `.` and `->`.
+#[test]
+fn member_slot_assignments_bind_member_calls() {
+    let a = run(vec![(
+        "m.c",
+        "struct vtable { void (*init)(void); void (*destroy)(void); };\nvoid my_init(void) {}\nvoid my_destroy(void) {}\nvoid run(void) {\n    struct vtable vt;\n    vt.init = my_init;\n    vt.destroy = my_destroy;\n    vt.init();\n    vt.destroy();\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.c::run", "CALLS", "m.c::my_init"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "m.c::run", "CALLS", "m.c::my_destroy"));
+}
+
+/// `(*fn)(v)` — the deref names the pointer, which the body bound.
+#[test]
+fn deref_calls_resolve_through_the_binding() {
+    let a = run(vec![(
+        "m.c",
+        "int target_func(int x) { return x; }\nint use_it(int v) {\n    int (*fn)(int) = target_func;\n    return (*fn)(v);\n}\n",
+    )]);
+    assert!(
+        has_edge(&a, "m.c::use_it", "CALLS", "m.c::target_func"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// An unbound member call stays a value's business — counted, never bound
+/// to a same-named function.
+#[test]
+fn unbound_member_calls_never_guess() {
+    let a = run(vec![(
+        "m.c",
+        "void on_event(void) {}\nstruct holder { void (*on_event)(void); };\nvoid run(struct holder *h) {\n    h->on_event();\n}\n",
+    )]);
+    assert!(
+        !has_edge(&a, "m.c::run", "CALLS", "m.c::on_event"),
+        "an unbound slot must not bind to a same-named function: {:?}",
+        a.edges
+    );
+    note_containing(&a, "left unresolved");
+}

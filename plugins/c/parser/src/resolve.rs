@@ -8,7 +8,7 @@
 //! merges into the definition wherever one exists: the definition wins the
 //! node.
 
-use crate::{Edge, FileFacts, Node, Props, edge_at};
+use crate::{Call, Edge, FileFacts, Node, Props, edge_at};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The assembled result: facts, and an account of what could not be done.
@@ -303,7 +303,31 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         unresolved += f.opaque;
         let file_key = crate::file_key(&f.file);
         let own_names = own.get(&file_key);
+        let hints: BTreeMap<(&str, &str), &str> = f
+            .hints
+            .iter()
+            .map(|h| ((h.caller.as_str(), h.name.as_str()), h.target.as_str()))
+            .collect();
         for c in &f.calls {
+            // A call through a bound function pointer resolves to what the
+            // body bound it to — one hop, first binding wins.
+            let name: String = match hints.get(&(c.caller.as_str(), c.name.as_str())) {
+                Some(target) => (*target).to_string(),
+                None => {
+                    if c.name.contains('.') {
+                        // A member slot nothing in this body bound: a
+                        // value's business after all.
+                        unresolved += 1;
+                        continue;
+                    }
+                    c.name.clone()
+                }
+            };
+            let c = &Call {
+                caller: c.caller.clone(),
+                name,
+                line: c.line,
+            };
             // Nearest first: this file's own symbol, static or not — the
             // compiler's shadowing rule, and a definition's own file is
             // always its caller's best answer.

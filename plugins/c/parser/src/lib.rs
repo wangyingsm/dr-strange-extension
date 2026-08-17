@@ -77,6 +77,20 @@ pub struct Call {
     pub line: u64,
 }
 
+/// A function-pointer binding the body states: `fp = target`,
+/// `cb_t f = &target`, `vt.init = my_init`. Calls through the bound name
+/// resolve to the target — first binding wins; reassignment flow is a
+/// checker's business.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hint {
+    pub caller: String,
+    /// The bound name — an identifier, or `base.field` for a member slot
+    /// (`->` and `.` normalized alike).
+    pub name: String,
+    /// The function identifier assigned.
+    pub target: String,
+}
+
 /// Everything one file contributes — the opaque partial the component
 /// serializes between the two phases.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -93,6 +107,8 @@ pub struct FileFacts {
     /// (path, is_system, line).
     pub includes: Vec<(String, bool, u64)>,
     pub opaque: usize,
+    /// Function-pointer bindings the bodies state.
+    pub hints: Vec<Hint>,
 }
 
 /// The extensions this plugin claims. `.h` is claimed too: a C header is C,
@@ -598,24 +614,106 @@ impl Walker<'_> {
         });
     }
 
+    /// The function identifier an initializer/right-hand side names:
+    /// `target`, `&target` — anything else is a value's business.
+    fn fn_ref(&self, node: TsNode) -> Option<String> {
+        match node.kind() {
+            "identifier" => Some(self.text(node)),
+            "pointer_expression" | "unary_expression" => {
+                let inner = node
+                    .child_by_field_name("argument")
+                    .or_else(|| node.named_child(0))?;
+                (inner.kind() == "identifier").then(|| self.text(inner))
+            }
+            _ => None,
+        }
+    }
+
+    /// A callable path: a bare identifier, or `base.field` for a member
+    /// slot (`->` and `.` alike). Deeper chains are a value's business.
+    fn call_path(&self, node: TsNode) -> Option<String> {
+        match node.kind() {
+            "identifier" => Some(self.text(node)),
+            "field_expression" => {
+                let base = node.child_by_field_name("argument")?;
+                let field = node.child_by_field_name("field")?;
+                (base.kind() == "identifier")
+                    .then(|| format!("{}.{}", self.text(base), self.text(field)))
+            }
+            // `(*fn)(v)` — the deref names the pointer.
+            "parenthesized_expression" => {
+                let inner = node.named_child(0)?;
+                if matches!(inner.kind(), "pointer_expression" | "unary_expression") {
+                    let arg = inner
+                        .child_by_field_name("argument")
+                        .or_else(|| inner.named_child(0))?;
+                    return (arg.kind() == "identifier").then(|| self.text(arg));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn hint(&mut self, caller: &str, name: String, target: String) {
+        if !self
+            .facts
+            .hints
+            .iter()
+            .any(|h| h.caller == caller && h.name == name)
+        {
+            self.facts.hints.push(Hint {
+                caller: caller.to_string(),
+                name,
+                target,
+            });
+        }
+    }
+
     fn collect_calls(&mut self, caller: &str, body: TsNode) {
         let mut stack = vec![body];
         while let Some(node) = stack.pop() {
-            if node.kind() == "call_expression"
-                && let Some(f) = node.child_by_field_name("function")
-            {
-                {
-                    if f.kind() == "identifier" {
-                        self.facts.calls.push(Call {
-                            caller: caller.to_string(),
-                            name: self.text(f),
-                            line: self.line(node),
-                        });
-                    } else {
-                        // `ops->read()`, `(*fn)()` — a value's business.
-                        self.facts.opaque += 1;
+            match node.kind() {
+                "call_expression" => {
+                    if let Some(f) = node.child_by_field_name("function") {
+                        match self.call_path(f) {
+                            Some(name) => self.facts.calls.push(Call {
+                                caller: caller.to_string(),
+                                name,
+                                line: self.line(node),
+                            }),
+                            // `ops->cfg->read()` and friends — a value's
+                            // business.
+                            None => self.facts.opaque += 1,
+                        }
                     }
                 }
+                // `cb_t f = target;` — a declarator init binds the name.
+                "declaration" => {
+                    for d in node.named_children(&mut node.walk()) {
+                        if d.kind() == "init_declarator"
+                            && let Some((name, _)) = d
+                                .child_by_field_name("declarator")
+                                .and_then(|dd| self.declarator_name(dd))
+                            && let Some(target) =
+                                d.child_by_field_name("value").and_then(|v| self.fn_ref(v))
+                        {
+                            self.hint(caller, name, target);
+                        }
+                    }
+                }
+                // `fp = target;` / `vt.init = my_init;`
+                "assignment_expression" => {
+                    if let (Some(left), Some(right)) = (
+                        node.child_by_field_name("left"),
+                        node.child_by_field_name("right"),
+                    ) && let Some(name) = self.call_path(left)
+                        && let Some(target) = self.fn_ref(right)
+                    {
+                        self.hint(caller, name, target);
+                    }
+                }
+                _ => {}
             }
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
