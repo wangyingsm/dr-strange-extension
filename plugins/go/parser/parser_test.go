@@ -728,7 +728,7 @@ func TestResolvedCallsAreStampedAndMissesAreLedgered(t *testing.T) {
 	evalOnly(t)
 	a := run(t, mapFiles{files: map[string]string{
 		"go.mod": "module m\n",
-		"t.go": "package m\n\nfunc helper() {}\n\nfunc run(x interface{ Weird() }) {\n\thelper()\n\tx.Weird()\n}\n",
+		"t.go":   "package m\n\nfunc helper() {}\n\nfunc run(x interface{ Weird() }) {\n\thelper()\n\tx.Weird()\n}\n",
 	}})
 	var stamped bool
 	for _, e := range a.Edges {
