@@ -527,3 +527,131 @@ fn an_unresolved_ref_is_one_node_not_two() {
         .count();
     assert_eq!(hits, 1, "one UnresolvedRef, no implied double");
 }
+
+// ---- baseline Tier B: receiver typing, inheritance, class receivers ------
+// (mined from codegraph + codebase-memory-mcp python resolution suites)
+
+/// An annotated parameter names the receiver's class — and two same-named
+/// methods never cross-attribute (the Logger/Other decoy discipline).
+#[test]
+fn annotated_params_type_receivers_without_crossing() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Logger:\n    def log(self):\n        return 1\n\nclass Other:\n    def log(self):\n        return 2\n\ndef use(lg: Logger):\n    return lg.log()\n\ndef use_other(o: Other):\n    return o.log()\n",
+    )]));
+    assert!(has_edge(&a, "m.use", "CALLS", "m.Logger.log"));
+    assert!(has_edge(&a, "m.use_other", "CALLS", "m.Other.log"));
+    assert!(!has_edge(&a, "m.use", "CALLS", "m.Other.log"));
+    assert!(!has_edge(&a, "m.use_other", "CALLS", "m.Logger.log"));
+}
+
+/// A constructor result types the local: `f = Foo(); f.method()`.
+#[test]
+fn constructor_results_type_locals() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Foo:\n    def method(self):\n        return 1\n\ndef use():\n    f = Foo()\n    return f.method()\n",
+    )]));
+    assert!(has_edge(&a, "m.use", "CALLS", "m.Foo.method"));
+}
+
+/// A factory's declared return types the value it makes — including the
+/// imported, cross-file form.
+#[test]
+fn declared_returns_type_factory_results() {
+    let a = run(&tree(vec![
+        (
+            "lib.py",
+            "class Conn:\n    def ping(self):\n        return 1\n\ndef make() -> Conn:\n    return Conn()\n",
+        ),
+        (
+            "app.py",
+            "from lib import make\n\ndef go():\n    c = make()\n    return c.ping()\n",
+        ),
+    ]));
+    assert!(
+        has_edge(&a, "app.go", "CALLS", "lib.Conn.ping"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// `self.shared()` resolves through the declared bases when the own class
+/// lacks the method.
+#[test]
+fn self_calls_walk_the_bases() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Base:\n    def shared(self):\n        return 1\n\nclass Child(Base):\n    def go(self):\n        return self.shared()\n",
+    )]));
+    assert!(has_edge(&a, "m.Child.go", "CALLS", "m.Base.shared"));
+}
+
+/// `super().greet()` starts at the bases — never the own class, even when
+/// it defines the same name.
+#[test]
+fn super_calls_resolve_on_the_base() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Base:\n    def greet(self):\n        return 1\n\nclass Child(Base):\n    def greet(self):\n        return super().greet()\n",
+    )]));
+    assert!(
+        has_edge(&a, "m.Child.greet", "CALLS", "m.Base.greet"),
+        "{:?}",
+        a.edges
+    );
+    assert!(!has_edge(&a, "m.Child.greet", "CALLS", "m.Child.greet"));
+}
+
+/// `self.cfg.display()` resolves when `__init__` states what `cfg` is —
+/// here through an annotated parameter assigned onto self.
+#[test]
+fn init_assigned_attributes_type_self_chains() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Config:\n    def display(self):\n        return 1\n\nclass App:\n    def __init__(self, cfg: Config):\n        self.cfg = cfg\n\n    def use(self):\n        return self.cfg.display()\n",
+    )]));
+    assert!(
+        has_edge(&a, "m.App.use", "CALLS", "m.Config.display"),
+        "{:?}",
+        a.edges
+    );
+}
+
+/// A class-level annotation types `self.x.method()` the same way.
+#[test]
+fn class_annotations_type_self_chains() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Foo:\n    def method(self):\n        return 1\n\nclass C:\n    x: Foo\n\n    def use(self):\n        return self.x.method()\n",
+    )]));
+    assert!(has_edge(&a, "m.C.use", "CALLS", "m.Foo.method"));
+}
+
+/// A class receiver reaches classmethods/staticmethods: `C.make()`.
+#[test]
+fn class_receivers_reach_class_methods() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class C:\n    @classmethod\n    def make(cls):\n        return cls()\n\ndef use():\n    return C.make()\n",
+    )]));
+    assert!(has_edge(&a, "m.use", "CALLS", "m.C.make"), "{:?}", a.edges);
+}
+
+/// The receiver stamps say which strategy bound the call.
+#[test]
+fn receiver_resolutions_are_stamped() {
+    let a = run(&tree(vec![(
+        "m.py",
+        "class Logger:\n    def log(self):\n        return 1\n\ndef use(lg: Logger):\n    return lg.log()\n",
+    )]));
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.src == "m.use" && e.dst == "m.Logger.log")
+        .expect("edge");
+    assert_eq!(
+        e.props.get("_resolved_by").and_then(|v| v.as_str()),
+        Some("receiver")
+    );
+}

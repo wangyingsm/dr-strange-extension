@@ -252,6 +252,112 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
+    // ---- receiver-typing indexes (annotations, constructors, bases) -------
+    // A lightweight resolver for TYPE names only: no externals are minted —
+    // a class outside this tree contributes no methods anyway.
+    let classes: BTreeSet<String> = all.iter().flat_map(|f| f.classes.iter().cloned()).collect();
+    let file_bindings = |f: &FileFacts| -> BTreeMap<String, (String, String)> {
+        f.bindings
+            .iter()
+            .map(|b| (b.local.clone(), (b.target.clone(), b.member.clone())))
+            .collect()
+    };
+    let decl_of = |f: &FileFacts,
+                   bindings: &BTreeMap<String, (String, String)>,
+                   written: &str|
+     -> Option<String> {
+        let parts: Vec<&str> = written.split('.').collect();
+        match parts.as_slice() {
+            [name] => {
+                if let Some((key, _)) = ix.decls.get(&f.module_id).and_then(|d| d.get(*name)) {
+                    return Some(key.clone());
+                }
+                let (target, member) = bindings.get(*name)?;
+                if member.is_empty() {
+                    return None;
+                }
+                ix.decl(target, member)
+            }
+            [root, rest @ ..] => {
+                let (target, member) = bindings.get(*root)?;
+                let mut module = target.clone();
+                if !member.is_empty() {
+                    module = format!("{module}.{member}");
+                }
+                for part in &rest[..rest.len() - 1] {
+                    module = format!("{module}.{part}");
+                }
+                ix.decl(&module, rest.last()?)
+            }
+            [] => None,
+        }
+    };
+    // Declared returns first: a constructed hint may type through a factory.
+    let mut returns_ix: BTreeMap<String, String> = BTreeMap::new();
+    let mut bases_ix: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for (fn_key, written) in &f.returns {
+            if let Some(key) = decl_of(f, &bindings, written)
+                && classes.contains(&key)
+            {
+                returns_ix.entry(fn_key.clone()).or_insert(key);
+            }
+        }
+        for (class_key, written, _) in &f.bases {
+            if let Some(key) = decl_of(f, &bindings, written)
+                && classes.contains(&key)
+            {
+                bases_ix.entry(class_key.clone()).or_default().push(key);
+            }
+        }
+    }
+    let mut hint_ix: BTreeMap<(String, String), String> = BTreeMap::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for h in &f.hints {
+            let resolved = decl_of(f, &bindings, &h.written);
+            let class = match resolved {
+                Some(key) if classes.contains(&key) => Some(key),
+                // A constructed hint may name a factory: its declared
+                // return, resolved in ITS file's context, types the value.
+                Some(key) if h.constructed => returns_ix.get(&key).cloned(),
+                _ => None,
+            };
+            if let Some(class) = class {
+                hint_ix
+                    .entry((h.caller.clone(), h.name.clone()))
+                    .or_insert(class);
+            }
+        }
+    }
+    // The method a class answers `name` with: its own, else the bases',
+    // left to right depth-first — Python's resolution order, near enough
+    // for declared facts.
+    fn method_walk(
+        ix: &Index,
+        bases: &BTreeMap<String, Vec<String>>,
+        class: &str,
+        name: &str,
+        depth: usize,
+    ) -> Option<String> {
+        if depth == 0 {
+            return None;
+        }
+        if ix
+            .class_methods
+            .get(class)
+            .is_some_and(|ms| ms.contains(name))
+        {
+            return Some(format!("{class}.{name}"));
+        }
+        bases
+            .get(class)
+            .into_iter()
+            .flatten()
+            .find_map(|b| method_walk(ix, bases, b, name, depth - 1))
+    }
+
     // ---- calls and bases ---------------------------------------------------
     let mut unresolved = 0usize;
     // The unresolved ledger (P1): a queryable UnresolvedRef node per
@@ -364,27 +470,75 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         };
 
         for c in &f.calls {
+            // A stamp the resolution path may sharpen past the kind default.
+            let mut how: Option<(&'static str, &'static str)> = None;
             let resolved = match &c.kind {
                 CallKind::Plain(name) => resolve_plain(name, &mut external, &mut external_calls),
-                CallKind::Chain(parts) => resolve_chain(parts, &mut external, &mut external_calls),
+                CallKind::Chain(parts) => {
+                    let chained = resolve_chain(parts, &mut external, &mut external_calls);
+                    match chained {
+                        Some(r) => Some(r),
+                        // Not an import chain. Two declared readings remain
+                        // for `x.m()`: a typed receiver (annotation or
+                        // constructor), or a class receiver (`C.make()`).
+                        None if parts.len() == 2 => {
+                            let (root, m) = (&parts[0], &parts[1]);
+                            if let Some(class) = hint_ix.get(&(c.caller.clone(), root.clone()))
+                                && let Some(key) = method_walk(&ix, &bases_ix, class, m, 5)
+                            {
+                                how = Some(("receiver", "high"));
+                                Some(Some(key))
+                            } else if let Some(class_key) = {
+                                let b = file_bindings(f);
+                                decl_of(f, &b, root).filter(|k| classes.contains(k))
+                            } && let Some(key) =
+                                method_walk(&ix, &bases_ix, &class_key, m, 5)
+                            {
+                                how = Some(("class", "high"));
+                                Some(Some(key))
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    }
+                }
                 CallKind::This { class, method } => {
                     let class_key = format!("{}.{class}", f.module_id);
-                    if ix
-                        .class_methods
+                    method_walk(&ix, &bases_ix, &class_key, method, 5).map(Some)
+                }
+                CallKind::Super { class, method } => {
+                    // The bases only: `super()` never lands on the own class.
+                    let class_key = format!("{}.{class}", f.module_id);
+                    bases_ix
                         .get(&class_key)
-                        .is_some_and(|ms| ms.contains(method))
-                    {
-                        Some(Some(format!("{class_key}.{method}")))
-                    } else {
-                        None
-                    }
+                        .into_iter()
+                        .flatten()
+                        .find_map(|b| method_walk(&ix, &bases_ix, b, method, 5))
+                        .map(Some)
+                }
+                CallKind::SelfAttr {
+                    class,
+                    attr,
+                    method,
+                } => {
+                    let class_key = format!("{}.{class}", f.module_id);
+                    hint_ix
+                        .get(&(class_key, attr.clone()))
+                        .and_then(|t| method_walk(&ix, &bases_ix, t, method, 5))
+                        .map(Some)
                 }
             };
             let (written, strategy, band) = match &c.kind {
                 CallKind::Plain(name) => (name.clone(), "name", "medium"),
                 CallKind::Chain(parts) => (parts.join("."), "chain", "medium"),
                 CallKind::This { method, .. } => (format!("self.{method}"), "self-class", "high"),
+                CallKind::Super { method, .. } => (format!("super().{method}"), "super", "high"),
+                CallKind::SelfAttr { attr, method, .. } => {
+                    (format!("self.{attr}.{method}"), "self-attr", "high")
+                }
             };
+            let (strategy, band) = how.unwrap_or((strategy, band));
             match resolved {
                 Some(Some(key)) => {
                     let mut e = edge_at(&c.caller, &key, "CALLS", c.line);

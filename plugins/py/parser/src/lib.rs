@@ -75,6 +75,15 @@ pub enum CallKind {
     Chain(Vec<String>),
     /// `self.m()` / `cls.m()` inside a class body — lexical, so resolvable.
     This { class: String, method: String },
+    /// `super().m()` inside a class body — resolved over the bases only.
+    Super { class: String, method: String },
+    /// `self.attr.m()` — resolvable when the class states `attr`'s class
+    /// (an annotation, or what `__init__` assigns).
+    SelfAttr {
+        class: String,
+        attr: String,
+        method: String,
+    },
 }
 
 /// One imported binding. `target` is the module it reaches, already dotted
@@ -101,6 +110,20 @@ pub struct LocalDecl {
     pub key: String,
     #[serde(default)]
     pub value: bool,
+}
+
+/// How a name is bound to a class the source states — an annotation, or a
+/// constructor/factory call the file can name. `caller` is a function key
+/// for params and locals, a CLASS key for instance attributes (`self.name`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Hint {
+    pub caller: String,
+    pub name: String,
+    /// The annotation or callee, as written (possibly dotted).
+    pub written: String,
+    /// True when `written` was called (`Foo()` / `make()`): the name may be
+    /// a class (constructor) or a factory whose return annotation types it.
+    pub constructed: bool,
 }
 
 /// Everything one file contributes — the opaque partial the component
@@ -135,6 +158,14 @@ pub struct FileFacts {
     pub exports: Vec<LocalDecl>,
     /// Call sites too dynamic to name at all.
     pub opaque: usize,
+    /// The classes this file declares, by key — what receiver typing may
+    /// resolve a written type to.
+    pub classes: Vec<String>,
+    /// Type bindings the source states (annotations, constructor results).
+    pub hints: Vec<Hint>,
+    /// `(function key, return annotation as written)` when it is a plain
+    /// dotted name — what types `x = make()`.
+    pub returns: Vec<(String, String)>,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -492,6 +523,98 @@ impl Walker<'_> {
         }
     }
 
+    /// A written type usable by receiver typing: a plain (possibly dotted)
+    /// identifier — `Foo`, `pkg.mod.Foo`. Subscripts (`Optional[Foo]`),
+    /// unions and strings are a checker's business and yield nothing.
+    fn dotted_ident(text: &str) -> Option<String> {
+        let t = text.trim();
+        let ok = !t.is_empty()
+            && t.split('.').all(|seg| {
+                !seg.is_empty()
+                    && seg
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_alphabetic() || c == '_')
+                    && seg.chars().all(|c| c.is_alphanumeric() || c == '_')
+            });
+        ok.then(|| t.to_string())
+    }
+
+    /// The callee of an initializer, as written, when it is a plain call —
+    /// `Foo(...)` / `pkg.make(...)`.
+    fn call_target(&self, e: &ast::Expr) -> Option<String> {
+        if let ast::Expr::Call(c) = e {
+            return Self::dotted_ident(&self.snippet(c.func.range()));
+        }
+        None
+    }
+
+    /// Walk a body for the locals whose class the source states: annotated
+    /// assignments and constructor/factory initializers. First binding wins.
+    fn body_hints(&mut self, caller: &str, body: &[ast::Stmt]) {
+        fn walk<'a>(out: &mut Vec<&'a ast::Stmt>, stmts: &'a [ast::Stmt]) {
+            for s in stmts {
+                out.push(s);
+                match s {
+                    ast::Stmt::If(i) => {
+                        walk(out, &i.body);
+                        for c in &i.elif_else_clauses {
+                            walk(out, &c.body);
+                        }
+                    }
+                    ast::Stmt::For(f) => {
+                        walk(out, &f.body);
+                        walk(out, &f.orelse);
+                    }
+                    ast::Stmt::While(w) => {
+                        walk(out, &w.body);
+                        walk(out, &w.orelse);
+                    }
+                    ast::Stmt::With(w) => walk(out, &w.body),
+                    ast::Stmt::Try(t) => {
+                        walk(out, &t.body);
+                        walk(out, &t.orelse);
+                        walk(out, &t.finalbody);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut flat = Vec::new();
+        walk(&mut flat, body);
+        let push = |name: String, written: String, constructed: bool, hints: &mut Vec<Hint>| {
+            if !hints.iter().any(|h| h.caller == caller && h.name == name) {
+                hints.push(Hint {
+                    caller: caller.to_string(),
+                    name,
+                    written,
+                    constructed,
+                });
+            }
+        };
+        let mut new_hints: Vec<Hint> = Vec::new();
+        for s in flat {
+            match s {
+                ast::Stmt::Assign(a) => {
+                    if let [ast::Expr::Name(n)] = a.targets.as_slice()
+                        && let Some(target) = self.call_target(&a.value)
+                    {
+                        push(n.id.to_string(), target, true, &mut new_hints);
+                    }
+                }
+                ast::Stmt::AnnAssign(a) => {
+                    if let ast::Expr::Name(n) = &*a.target
+                        && let Some(ann) = Self::dotted_ident(&self.snippet(a.annotation.range()))
+                    {
+                        push(n.id.to_string(), ann, false, &mut new_hints);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.facts.hints.extend(new_hints);
+    }
+
     fn function(&mut self, f: &ast::StmtFunctionDef, class: Option<(&str, &str)>) {
         let name = f.name.id.to_string();
         let (label, key, parent) = match class {
@@ -560,6 +683,36 @@ impl Walker<'_> {
 
         let in_class = class.map(|(n, _)| n.to_string());
         self.collect_calls(&key, &f.body, in_class.as_deref());
+
+        // Receiver-typing inputs: annotated parameters, the declared return
+        // (what types `x = make()`), and the body's own stated bindings.
+        for param in f.parameters.iter_non_variadic_params() {
+            let pname = param.parameter.name.id.to_string();
+            if pname == "self" || pname == "cls" {
+                continue;
+            }
+            if let Some(ann) = &param.parameter.annotation
+                && let Some(written) = Self::dotted_ident(&self.snippet(ann.range()))
+                && !self
+                    .facts
+                    .hints
+                    .iter()
+                    .any(|h| h.caller == key && h.name == pname)
+            {
+                self.facts.hints.push(Hint {
+                    caller: key.clone(),
+                    name: pname,
+                    written,
+                    constructed: false,
+                });
+            }
+        }
+        if let Some(ret) = &f.returns
+            && let Some(written) = Self::dotted_ident(&self.snippet(ret.range()))
+        {
+            self.facts.returns.push((key.clone(), written));
+        }
+        self.body_hints(&key, &f.body);
     }
 
     fn class(&mut self, c: &ast::StmtClassDef, outer: Option<&str>) {
@@ -580,6 +733,7 @@ impl Walker<'_> {
         // Fields as the family writes them: `name: type` in declaration
         // order — class-level annotations first, then what `__init__`
         // assigns onto `self`, both of which are how Python declares them.
+        self.facts.classes.push(key.clone());
         let mut fields: Vec<String> = Vec::new();
         let mut seen_fields: std::collections::BTreeSet<String> = Default::default();
         for stmt in &c.body {
@@ -589,6 +743,23 @@ impl Walker<'_> {
                         let entry = format!("{}: {}", n.id, self.snippet(a.annotation.range()));
                         if seen_fields.insert(n.id.to_string()) {
                             fields.push(entry);
+                        }
+                        // A class-level annotation states the attribute's
+                        // class for every `self.x.m()` in the body.
+                        if let Some(written) =
+                            Self::dotted_ident(&self.snippet(a.annotation.range()))
+                            && !self
+                                .facts
+                                .hints
+                                .iter()
+                                .any(|h| h.caller == key && h.name == n.id.as_str())
+                        {
+                            self.facts.hints.push(Hint {
+                                caller: key.clone(),
+                                name: n.id.to_string(),
+                                written,
+                                constructed: false,
+                            });
                         }
                     }
                 }
@@ -602,6 +773,17 @@ impl Walker<'_> {
                     }
                 }
                 ast::Stmt::FunctionDef(f) if f.name.id == "__init__" => {
+                    // What `__init__` states about each attribute's class:
+                    // an annotation, a constructor call, or an annotated
+                    // parameter assigned through (`self.cfg = cfg`).
+                    let mut params: std::collections::BTreeMap<String, String> = Default::default();
+                    for param in f.parameters.iter_non_variadic_params() {
+                        if let Some(a) = &param.parameter.annotation
+                            && let Some(w) = Self::dotted_ident(&self.snippet(a.range()))
+                        {
+                            params.insert(param.parameter.name.id.to_string(), w);
+                        }
+                    }
                     for s in &f.body {
                         let (target, ann) = match s {
                             ast::Stmt::Assign(a) => (a.targets.first(), None),
@@ -613,12 +795,39 @@ impl Walker<'_> {
                         if let Some(ast::Expr::Attribute(at)) = target
                             && let ast::Expr::Name(base) = &*at.value
                             && base.id == "self"
-                            && seen_fields.insert(at.attr.id.to_string())
                         {
-                            fields.push(match ann {
-                                Some(r) => format!("{}: {}", at.attr.id, self.snippet(r)),
-                                None => at.attr.id.to_string(),
-                            });
+                            if seen_fields.insert(at.attr.id.to_string()) {
+                                fields.push(match ann {
+                                    Some(r) => format!("{}: {}", at.attr.id, self.snippet(r)),
+                                    None => at.attr.id.to_string(),
+                                });
+                            }
+                            let hint = match (ann, s) {
+                                (Some(r), _) => {
+                                    Self::dotted_ident(&self.snippet(r)).map(|w| (w, false))
+                                }
+                                (None, ast::Stmt::Assign(a)) => match &*a.value {
+                                    ast::Expr::Name(v) => {
+                                        params.get(v.id.as_str()).map(|w| (w.clone(), false))
+                                    }
+                                    _ => self.call_target(&a.value).map(|w| (w, true)),
+                                },
+                                _ => None,
+                            };
+                            if let Some((written, constructed)) = hint
+                                && !self
+                                    .facts
+                                    .hints
+                                    .iter()
+                                    .any(|h| h.caller == key && h.name == at.attr.id.as_str())
+                            {
+                                self.facts.hints.push(Hint {
+                                    caller: key.clone(),
+                                    name: at.attr.id.to_string(),
+                                    written,
+                                    constructed,
+                                });
+                            }
                         }
                     }
                 }
@@ -939,7 +1148,7 @@ impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
                     kind: CallKind::Plain(n.id.to_string()),
                     line,
                 }),
-                ast::Expr::Attribute(_) => match dotted(&call.func) {
+                ast::Expr::Attribute(at) => match dotted(&call.func) {
                     Some(written) => {
                         let parts: Vec<String> = written.split('.').map(str::to_string).collect();
                         let kind = match (parts.first().map(String::as_str), &self.class) {
@@ -947,6 +1156,15 @@ impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
                                 CallKind::This {
                                     class: class.clone(),
                                     method: parts[1].clone(),
+                                }
+                            }
+                            // `self.attr.m()` — resolvable when the class
+                            // states what `attr` is.
+                            (Some("self") | Some("cls"), Some(class)) if parts.len() == 3 => {
+                                CallKind::SelfAttr {
+                                    class: class.clone(),
+                                    attr: parts[1].clone(),
+                                    method: parts[2].clone(),
                                 }
                             }
                             (Some("self") | Some("cls"), _) => {
@@ -962,7 +1180,25 @@ impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
                             line,
                         });
                     }
-                    None => self.walker.facts.opaque += 1,
+                    // `super().m()` — a call receiver, so `dotted` refuses
+                    // it; the shape itself is lexical and resolvable.
+                    None => {
+                        if let (ast::Expr::Call(inner), Some(class)) = (&*at.value, &self.class)
+                            && let ast::Expr::Name(n) = &*inner.func
+                            && n.id == "super"
+                        {
+                            self.walker.facts.calls.push(Call {
+                                caller: self.caller.clone(),
+                                kind: CallKind::Super {
+                                    class: class.clone(),
+                                    method: at.attr.id.to_string(),
+                                },
+                                line,
+                            });
+                        } else {
+                            self.walker.facts.opaque += 1;
+                        }
+                    }
                 },
                 _ => self.walker.facts.opaque += 1,
             }
