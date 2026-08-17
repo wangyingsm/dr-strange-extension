@@ -142,6 +142,14 @@ pub struct FileFacts {
     /// `(function key, declared return shape)` for every free function whose
     /// return names a usable type — what types a `let x = f();` receiver.
     returns: Vec<(String, RetShape)>,
+    /// `(type key, field name, field type as written)` for plain-path struct
+    /// fields — what types `o.field.m()` and `self.field.m()`.
+    field_types: Vec<(String, String, String)>,
+    /// `(caller key, struct path as written, line)` for struct-literal
+    /// expressions — a `Widget { .. }` is a use of the type, worth an edge.
+    insts: Vec<(String, String, u64)>,
+    /// `(trait key, supertrait base path as written, line)` — `trait E: D`.
+    trait_bases: Vec<(String, String, u64)>,
     /// `(caller key, local name, how its type is known)` — the bindings whose
     /// type a parser *can* know, kept for method-call resolution.
     local_hints: Vec<(String, String, LocalHint)>,
@@ -442,6 +450,14 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                 simple(f, parent, &s.ident, "Struct", &s.attrs, &s.vis);
                 set_fields(f, s.fields.iter());
                 set_non_exhaustive(f, &s.attrs);
+                // Plain-path field types, machine-readable: what types
+                // `o.field.m()` when the receiver walks a field.
+                let key = format!("{parent}::{}", s.ident);
+                for field in s.fields.iter() {
+                    if let (Some(id), Some(t)) = (&field.ident, plain_type_path(&field.ty)) {
+                        f.field_types.push((key.clone(), id.to_string(), t));
+                    }
+                }
             }
             syn::Item::Enum(e) => {
                 simple(f, parent, &e.ident, "Enum", &e.attrs, &e.vis);
@@ -557,6 +573,14 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
             },
             syn::Item::Trait(t) => {
                 let key = format!("{parent}::{}", t.ident);
+                for bound in &t.supertraits {
+                    if let syn::TypeParamBound::Trait(tb) = bound
+                        && tb.lifetimes.is_none()
+                    {
+                        f.trait_bases
+                            .push((key.clone(), base_path(&tb.path), line_of(&t.ident)));
+                    }
+                }
                 node(
                     f,
                     parent,
@@ -649,17 +673,21 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                 if include_source {
                     add_source(&mut props, ii);
                 }
-                Some(ImplMethod {
-                    name: m.sig.ident.to_string(),
-                    label: label.to_string(),
-                    props,
-                    calls: call_names(&m.block),
-                    ret: ret_shape(&m.sig),
-                    locals: local_hints(&m.block)
-                        .into_iter()
-                        .chain(param_hints(&m.sig))
-                        .collect(),
-                    line: line_of(&m.sig.ident),
+                Some({
+                    let body = call_names(&m.block);
+                    ImplMethod {
+                        name: m.sig.ident.to_string(),
+                        label: label.to_string(),
+                        props,
+                        calls: body.calls,
+                        insts: body.insts,
+                        ret: ret_shape(&m.sig),
+                        locals: local_hints(&m.block)
+                            .into_iter()
+                            .chain(param_hints(&m.sig))
+                            .collect(),
+                        line: line_of(&m.sig.ident),
+                    }
                 })
             }
             _ => None,
@@ -701,6 +729,8 @@ struct ImplMethod {
     label: String,
     props: Props,
     calls: BTreeSet<Call>,
+    /// `(struct path as written, line)` for the body's struct literals.
+    insts: BTreeSet<(String, u64)>,
     /// Declared return shape when usable; `Self` is resolved to the impl's
     /// type at assemble, where the type's key is known.
     ret: Option<RetShape>,
@@ -708,22 +738,53 @@ struct ImplMethod {
     locals: Vec<(String, LocalHint)>,
 }
 
-/// Record every call this body makes, for later resolution.
+/// Record every call and struct literal this body holds, for later
+/// resolution.
 fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
-    for c in call_names(block) {
+    let body = call_names(block);
+    for c in body.calls {
         f.calls.push((caller.to_string(), c));
+    }
+    for (path, line) in body.insts {
+        f.insts.push((caller.to_string(), path, line));
     }
 }
 
-/// Everything this body calls, deduplicated and in a stable order.
-fn call_names(block: &syn::Block) -> BTreeSet<Call> {
-    struct Calls<'a>(&'a mut BTreeSet<Call>);
+/// A method receiver as a dotted name path — `txn`, `o.inner`,
+/// `self.graph` — or nothing when the receiver is any other expression.
+fn recv_path(e: &syn::Expr) -> Option<String> {
+    match e {
+        syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+            Some(p.path.segments[0].ident.to_string())
+        }
+        syn::Expr::Field(f) => {
+            let base = recv_path(&f.base)?;
+            match &f.member {
+                syn::Member::Named(id) => Some(format!("{base}.{id}")),
+                syn::Member::Unnamed(_) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// What one body does: the calls it makes and the struct literals it builds,
+/// each deduplicated and in a stable order.
+#[derive(Default)]
+struct BodyFacts {
+    calls: BTreeSet<Call>,
+    /// `(struct path as written, first line)`.
+    insts: BTreeSet<(String, u64)>,
+}
+
+fn call_names(block: &syn::Block) -> BodyFacts {
+    struct Calls<'a>(&'a mut BodyFacts);
     impl<'ast> Visit<'ast> for Calls<'_> {
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
             if let syn::Expr::Path(p) = &*node.func
                 && let Some(last) = p.path.segments.last()
             {
-                self.0.insert(Call {
+                self.0.calls.insert(Call {
                     name: last.ident.to_string(),
                     path: Some(path_of(&p.path)),
                     recv: None,
@@ -733,24 +794,24 @@ fn call_names(block: &syn::Block) -> BTreeSet<Call> {
             syn::visit::visit_expr_call(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            let recv = match &*node.receiver {
-                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
-                    Some(p.path.segments[0].ident.to_string())
-                }
-                _ => None,
-            };
-            self.0.insert(Call {
+            self.0.calls.insert(Call {
                 name: node.method.to_string(),
                 path: None,
-                recv,
+                recv: recv_path(&node.receiver),
                 line: line_of(node),
             });
             syn::visit::visit_expr_method_call(self, node);
         }
+        fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+            if node.qself.is_none() {
+                self.0.insts.insert((path_of(&node.path), line_of(node)));
+            }
+            syn::visit::visit_expr_struct(self, node);
+        }
     }
-    let mut names = BTreeSet::new();
-    Calls(&mut names).visit_block(block);
-    names
+    let mut out = BodyFacts::default();
+    Calls(&mut out).visit_block(block);
+    out
 }
 
 /// The locals whose type this body states outright.
@@ -829,9 +890,7 @@ fn param_hints(sig: &syn::Signature) -> Vec<(String, LocalHint)> {
         .iter()
         .filter_map(|arg| match arg {
             syn::FnArg::Typed(t) => match (&*t.pat, plain_type_path(&t.ty)) {
-                (syn::Pat::Ident(i), Some(ty)) => {
-                    Some((i.ident.to_string(), LocalHint::Typed(ty)))
-                }
+                (syn::Pat::Ident(i), Some(ty)) => Some((i.ident.to_string(), LocalHint::Typed(ty))),
                 _ => None,
             },
             syn::FnArg::Receiver(_) => None,
@@ -1011,6 +1070,16 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // imports here, while that file is still in hand.
     let mut returns_map: BTreeMap<String, RetShape> = BTreeMap::new();
     let mut local_inits: BTreeMap<(String, String), LocalHint> = BTreeMap::new();
+    // Field types per (type key, field name), expanded through the writing
+    // file's imports — what a dotted receiver walks. The module rides along
+    // for scope-narrowed resolution of the written type.
+    let mut fields_map: BTreeMap<(String, String), (String, String)> = BTreeMap::new();
+    // Trait conformance, for method resolution: which traits a type
+    // implements, and where its trait-impl methods actually live.
+    let mut impls_of: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut trait_impl_methods: BTreeMap<(String, String), String> = BTreeMap::new();
+    // Struct literals, caller-attributed, paths expanded like calls.
+    let mut pending_insts: Vec<(String, String, u64)> = Vec::new();
 
     let aliases = build_aliases(&files, &declared);
 
@@ -1036,6 +1105,31 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             local_inits
                 .entry((caller.clone(), ident.clone()))
                 .or_insert(expanded);
+        }
+        for (type_key, field, written) in &f.field_types {
+            fields_map
+                .entry((type_key.clone(), field.clone()))
+                .or_insert((expand_path(written, &imports, &f.module), f.module.clone()));
+        }
+        for (caller, path, line) in &f.insts {
+            pending_insts.push((
+                caller.clone(),
+                expand_path(path, &imports, &f.module),
+                *line,
+            ));
+        }
+        for (trait_key, written, line) in &f.trait_bases {
+            let target = resolve(
+                written,
+                &f.module,
+                &imports,
+                &traits,
+                &declared,
+                &scopes,
+                "Trait",
+                &mut external,
+            );
+            impl_edges.push(edge_at(trait_key, &target, "EXTENDS", *line));
         }
 
         // Every `use` becomes an edge to what it names. An import that lands
@@ -1136,6 +1230,10 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     "Trait",
                     &mut external,
                 );
+                impls_of
+                    .entry(self_key.clone())
+                    .or_default()
+                    .push(trait_key.clone());
                 let mut e = edge_at(&self_key, &trait_key, "IMPLEMENTS", b.line);
                 // `From<i64>` on the edge rather than as a second `From` node:
                 // which implementation is a fact about this impl, not a new
@@ -1168,6 +1266,22 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 // free function, and both path- and receiver-resolution end
                 // on a declared-key check.
                 declared.insert(mkey.clone());
+                if b.trait_full.is_some() {
+                    // Where the type's implementation of a trait method
+                    // lives — the `<T as Tr>::m` key nothing can spell from
+                    // a call site.
+                    trait_impl_methods
+                        .entry((self_key.clone(), m.name.clone()))
+                        .or_insert(mkey.clone());
+                }
+                for (path, line) in &m.insts {
+                    let expanded = match path.strip_prefix("Self") {
+                        Some("") => self_key.clone(),
+                        Some(rest) => format!("{self_key}{rest}"),
+                        None => expand_path(path, &imports, &b.module),
+                    };
+                    pending_insts.push((mkey.clone(), expanded, *line));
+                }
                 // `Self` means this block's type, and only this block knows
                 // which — rewritten here for paths, returns and locals alike.
                 let deself = |p: &str| match p.strip_prefix("Self::") {
@@ -1318,18 +1432,26 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         aliases: &aliases,
         returns_map: &returns_map,
         local_inits: &local_inits,
+        fields_map: &fields_map,
+        impls_of: &impls_of,
+        trait_impl_methods: &trait_impl_methods,
     };
     let typed_target = |caller: &str, call: &Call| -> Option<(String, &'static str)> {
         let recv = call.recv.as_deref()?;
-        let ty = if recv == "self" {
+        // A dotted receiver walks declared field types: `o.inner.ping()`
+        // types `o`, then reads what `inner` is stated to be.
+        let mut segments = recv.split('.');
+        let head = segments.next()?;
+        let mut ty = if head == "self" {
             owner_of(caller)?
         } else {
-            typing.local_type(caller, recv, 8)?
+            typing.local_type(caller, head, 8)?
         };
-        let mk = format!("{ty}::{}", call.name);
-        declared
-            .contains(&mk)
-            .then_some((mk, if recv == "self" { "self" } else { "receiver" }))
+        for field in segments {
+            ty = typing.field_type(&ty, field)?;
+        }
+        let (mk, how) = typing.method_target(&ty, &call.name)?;
+        Some((mk, if recv == "self" { "self" } else { how }))
     };
 
     for (caller, file, call) in pending {
@@ -1428,6 +1550,32 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             "method call: receiver type unknown".into(),
         );
     }
+    // Struct literals: a `Widget { .. }` uses the type as surely as a call
+    // uses a function — resolved the same way, emitted as INSTANTIATES.
+    let mut inst_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (caller, p, line) in pending_insts {
+        let module = scopes.get(&caller).cloned().unwrap_or_default();
+        let target = if declared.contains(&p) {
+            Some(p.clone())
+        } else if let Some(hit) = resolve_relative(&p, &module, &aliases, &declared) {
+            Some(hit)
+        } else if p.contains("::") {
+            note_external(&mut external, &p, Some("Struct"));
+            Some(p.clone())
+        } else {
+            types
+                .get(&p)
+                .and_then(|cands| pick_in_scope(&module, cands, &scopes))
+                .cloned()
+        };
+        if let Some(target) = target
+            && inst_seen.insert((caller.clone(), target.clone()))
+        {
+            out.edges
+                .push(edge_at(&caller, &target, "INSTANTIATES", line));
+        }
+    }
+
     out.nodes.extend(unresolved_nodes.into_values());
 
     // Last, because resolving calls is itself a source of external nodes: a
@@ -1695,6 +1843,9 @@ struct Typing<'a> {
     aliases: &'a BTreeMap<String, String>,
     returns_map: &'a BTreeMap<String, RetShape>,
     local_inits: &'a BTreeMap<(String, String), LocalHint>,
+    fields_map: &'a BTreeMap<(String, String), (String, String)>,
+    impls_of: &'a BTreeMap<String, Vec<String>>,
+    trait_impl_methods: &'a BTreeMap<(String, String), String>,
 }
 
 impl Typing<'_> {
@@ -1724,6 +1875,36 @@ impl Typing<'_> {
         };
         let module = self.scopes.get(callable).map(String::as_str).unwrap_or("");
         self.type_key(written, module)
+    }
+
+    /// The declared type of a field, resolved — one hop of a dotted
+    /// receiver (`o.inner`).
+    fn field_type(&self, ty: &str, field: &str) -> Option<String> {
+        let (written, module) = self.fields_map.get(&(ty.to_string(), field.to_string()))?;
+        self.type_key(written, module)
+    }
+
+    /// The method a type answers `name` with: its own inherent method, the
+    /// impl of a trait method (`<T as Tr>::m` — a key no call site can
+    /// spell), or a default method on a trait it declares it implements.
+    fn method_target(&self, ty: &str, name: &str) -> Option<(String, &'static str)> {
+        let inherent = format!("{ty}::{name}");
+        if self.declared.contains(&inherent) {
+            return Some((inherent, "receiver"));
+        }
+        if let Some(mk) = self
+            .trait_impl_methods
+            .get(&(ty.to_string(), name.to_string()))
+        {
+            return Some((mk.clone(), "receiver"));
+        }
+        for tr in self.impls_of.get(ty).into_iter().flatten() {
+            let default = format!("{tr}::{name}");
+            if self.declared.contains(&default) {
+                return Some((default, "trait"));
+            }
+        }
+        None
     }
 
     /// The resolved type of a body's local, through its annotation or its

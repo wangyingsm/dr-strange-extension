@@ -1657,3 +1657,162 @@ fn typed_params_never_cross_attribute_same_named_methods() {
     assert!(!has_edge(&a, "k::pick_apple", "CALLS", "k::Orange::name"));
     assert!(!has_edge(&a, "k::pick_orange", "CALLS", "k::Apple::name"));
 }
+
+// ---- baseline Tier B: conformance, fields, instantiation, supertraits ----
+
+/// codegraph: a chained method found only on an implemented trait's default
+/// resolves through conformance — and a same-named decoy method never wins.
+#[test]
+fn trait_default_methods_resolve_through_conformance() {
+    let t = Tree::new("bl-traitdefault");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub struct Foo;\nimpl Foo { pub fn new() -> Foo { Foo } }\n",
+            "pub struct Decoy;\nimpl Decoy { pub fn draw(&self) {} }\n",
+            "pub trait Drawable { fn draw(&self) {} }\nimpl Drawable for Foo {}\n",
+            "pub fn caller() { let f = Foo::new(); f.draw(); }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::caller", "CALLS", "k::Drawable::draw"),
+        "conformance reaches the trait's default method: {:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(!has_edge(&a, "k::caller", "CALLS", "k::Decoy::draw"));
+}
+
+/// A trait method the impl overrides resolves to the impl's own
+/// `<T as Trait>::m` — the key no call site can spell.
+#[test]
+fn overridden_trait_methods_resolve_to_the_impl() {
+    let t = Tree::new("bl-traitimpl");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub struct Foo;\n",
+            "pub trait Render { fn render(&self) -> i32; }\n",
+            "impl Render for Foo { fn render(&self) -> i32 { 1 } }\n",
+            "pub fn caller(f: &Foo) -> i32 { f.render() }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::caller", "CALLS", "<k::Foo as Render>::render"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS")
+            .map(|e| e.dst.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// codegraph #1276-shape: a dotted receiver walks declared field types —
+/// `o.inner.ping()` and `self.inner.ping()` both resolve.
+#[test]
+fn field_chains_type_receivers() {
+    let t = Tree::new("bl-fieldchain");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub struct Inner;\nimpl Inner { pub fn ping(&self) -> i32 { 1 } }\n",
+            "pub struct Outer { pub inner: Inner }\n",
+            "impl Outer { pub fn go(&self) -> i32 { self.inner.ping() } }\n",
+            "pub fn run(o: &Outer) -> i32 { o.inner.ping() }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::run", "CALLS", "k::Inner::ping"),
+        "{:?}",
+        a.edges
+    );
+    assert!(has_edge(&a, "k::Outer::go", "CALLS", "k::Inner::ping"));
+}
+
+/// codegraph: a struct literal is a use of the type — cross-module, through
+/// the import, as an INSTANTIATES fact.
+#[test]
+fn struct_literals_are_instantiation_facts() {
+    let t = Tree::new("bl-instantiate");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n")
+        .write("src/lib.rs", "pub mod types;\npub mod consumer;\n")
+        .write("src/types.rs", "pub struct Widget { pub n: i32 }\n")
+        .write(
+            "src/consumer.rs",
+            "use crate::types::Widget;\npub fn build() -> Widget { Widget { n: 1 } }\n",
+        );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::consumer::build", "INSTANTIATES", "k::types::Widget"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "INSTANTIATES")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// codegraph: `pub union` is a first-class type — extracted, implementable,
+/// its methods resolvable like any other.
+#[test]
+fn unions_are_types_with_methods() {
+    let t = Tree::new("bl-union");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub union Reg { pub raw: u32 }\n",
+            "impl Reg { pub fn describe(&self) -> u32 { unsafe { self.raw } } }\n",
+            "pub fn run(r: &Reg) -> u32 { r.describe() }\n",
+        ),
+    );
+    let a = run(&t);
+    let union = a
+        .nodes
+        .iter()
+        .find(|n| n.key == "k::Reg")
+        .expect("union node");
+    assert_eq!(union.label, "Union");
+    assert!(has_edge(&a, "k::run", "CALLS", "k::Reg::describe"));
+}
+
+/// codegraph: `trait Error: Display` — the supertrait is an EXTENDS fact.
+#[test]
+fn supertraits_become_extends_edges() {
+    let t = Tree::new("bl-supertrait");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        "pub trait Display2 {}\npub trait Error2: Display2 { fn describe(&self) -> i32 { 0 } }\n",
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::Error2", "EXTENDS", "k::Display2"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "EXTENDS")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// codegraph kernel-parity shape: an impl written above its struct resolves
+/// the same as one below — assemble sees the whole batch.
+#[test]
+fn impl_before_struct_is_order_independent() {
+    let t = Tree::new("bl-implfirst");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        "impl Later { pub fn go(&self) -> i32 { 1 } }\npub struct Later;\npub fn run(l: &Later) -> i32 { l.go() }\n",
+    );
+    let a = run(&t);
+    assert!(has_edge(&a, "k::Later", "HAS_METHOD", "k::Later::go"));
+    assert!(has_edge(&a, "k::run", "CALLS", "k::Later::go"));
+}
