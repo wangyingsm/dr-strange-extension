@@ -150,6 +150,11 @@ pub struct FileFacts {
     insts: Vec<(String, String, u64)>,
     /// `(caller key, bare name, line)` — functions passed as values.
     fn_refs: Vec<(String, String, u64)>,
+    /// `(caller, callee, arg index, closure param names)` — closures whose
+    /// parameters the callee's declared bound may type.
+    closure_uses: Vec<(String, ClosureCallee, usize, Vec<String>)>,
+    /// `(fn key, arg index, declared closure-arg types)` from signatures.
+    closure_sigs: Vec<(String, usize, Vec<String>)>,
     /// `(trait key, supertrait base path as written, line)` — `trait E: D`.
     trait_bases: Vec<(String, String, u64)>,
     /// `(caller key, local name, how its type is known)` — the bindings whose
@@ -441,6 +446,9 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                 if let Some(ret) = ret_shape(&func.sig) {
                     f.returns.push((key.clone(), ret));
                 }
+                for (idx, args) in closure_sig(&func.sig) {
+                    f.closure_sigs.push((key.clone(), idx, args));
+                }
                 for (ident, hint) in local_hints(&func.block)
                     .into_iter()
                     .chain(param_hints(&func.sig))
@@ -684,6 +692,8 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                         calls: body.calls,
                         insts: body.insts,
                         fn_refs: body.fn_refs,
+                        closures: body.closures,
+                        closure_sigs: closure_sig(&m.sig),
                         ret: ret_shape(&m.sig),
                         locals: local_hints(&m.block)
                             .into_iter()
@@ -736,6 +746,10 @@ struct ImplMethod {
     insts: BTreeSet<(String, u64)>,
     /// `(bare name, line)` — functions passed as values in the body.
     fn_refs: BTreeSet<(String, u64)>,
+    /// Closures handed to calls in the body.
+    closures: Vec<(ClosureCallee, usize, Vec<String>)>,
+    /// Declared closure-arg types per parameter position of this method.
+    closure_sigs: Vec<(usize, Vec<String>)>,
     /// Declared return shape when usable; `Self` is resolved to the impl's
     /// type at assemble, where the type's key is known.
     ret: Option<RetShape>,
@@ -756,6 +770,101 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
     for (name, line) in body.fn_refs {
         f.fn_refs.push((caller.to_string(), name, line));
     }
+    for (callee, idx, params) in body.closures {
+        f.closure_uses
+            .push((caller.to_string(), callee, idx, params));
+    }
+}
+
+/// A closure argument's parameter names — plain idents only; patterns are
+/// a checker's business.
+fn closure_params(e: &syn::Expr) -> Option<Vec<String>> {
+    let syn::Expr::Closure(c) = e else {
+        return None;
+    };
+    let names = c
+        .inputs
+        .iter()
+        .map(|pat| match pat {
+            syn::Pat::Ident(i) => Some(i.ident.to_string()),
+            syn::Pat::Type(t) => match &*t.pat {
+                syn::Pat::Ident(i) => Some(i.ident.to_string()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (!names.is_empty()).then_some(names)
+}
+
+/// The closure-argument types a signature declares, per parameter position:
+/// `impl Fn(&Plane)`, a generic with an `Fn(&Plane)` bound (inline or in a
+/// where clause), or a plain `fn(&Plane)` pointer. What only inference
+/// would know stays out.
+fn closure_sig(sig: &syn::Signature) -> Vec<(usize, Vec<String>)> {
+    let fn_bound_args = |bounds: &syn::punctuated::Punctuated<
+        syn::TypeParamBound,
+        syn::token::Plus,
+    >|
+     -> Option<Vec<String>> {
+        for b in bounds {
+            if let syn::TypeParamBound::Trait(t) = b
+                && let Some(last) = t.path.segments.last()
+                && matches!(last.ident.to_string().as_str(), "Fn" | "FnMut" | "FnOnce")
+                && let syn::PathArguments::Parenthesized(p) = &last.arguments
+            {
+                return p.inputs.iter().map(plain_type_path).collect();
+            }
+        }
+        None
+    };
+    // Generic params with Fn bounds, by name — inline bounds and where
+    // clauses both.
+    let mut generic_fns: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for gp in &sig.generics.params {
+        if let syn::GenericParam::Type(t) = gp
+            && let Some(args) = fn_bound_args(&t.bounds)
+        {
+            generic_fns.insert(t.ident.to_string(), args);
+        }
+    }
+    if let Some(wc) = &sig.generics.where_clause {
+        for pred in &wc.predicates {
+            if let syn::WherePredicate::Type(pt) = pred
+                && let Some(name) = plain_type_path(&pt.bounded_ty)
+                && let Some(args) = fn_bound_args(&pt.bounds)
+            {
+                generic_fns.entry(name).or_insert(args);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (i, input) in sig.inputs.iter().enumerate() {
+        let syn::FnArg::Typed(t) = input else {
+            continue;
+        };
+        // Positions are argument positions: the receiver never counts.
+        let index = if matches!(sig.inputs.first(), Some(syn::FnArg::Receiver(_))) {
+            i - 1
+        } else {
+            i
+        };
+        let args = match &*t.ty {
+            syn::Type::ImplTrait(it) => fn_bound_args(&it.bounds),
+            syn::Type::BareFn(bf) => bf
+                .inputs
+                .iter()
+                .map(|a| plain_type_path(&a.ty))
+                .collect::<Option<Vec<_>>>(),
+            other => plain_type_path(other).and_then(|n| generic_fns.get(&n).cloned()),
+        };
+        if let Some(args) = args
+            && !args.is_empty()
+        {
+            out.push((index, args));
+        }
+    }
+    out
 }
 
 /// A bare (single-segment) name passed as a call argument — `handler` in
@@ -793,6 +902,16 @@ fn recv_path(e: &syn::Expr) -> Option<String> {
 
 /// What one body does: the calls it makes and the struct literals it builds,
 /// each deduplicated and in a stable order.
+/// What a closure was handed to — resolved at assemble, where the callee's
+/// declared `Fn(...)` bound can type the closure's parameters.
+#[derive(Clone, Serialize, Deserialize)]
+enum ClosureCallee {
+    /// `on_all(|p| …)` / `path::to(|p| …)` — the path as written.
+    Path(String),
+    /// `x.on_all(|p| …)` — a method call; recv as [`recv_path`] gives it.
+    Method { recv: Option<String>, name: String },
+}
+
 #[derive(Default)]
 struct BodyFacts {
     calls: BTreeSet<Call>,
@@ -801,6 +920,9 @@ struct BodyFacts {
     /// `(bare name, first line)` — a function passed as a value:
     /// `register(handler)`, `map(handler)`, `&handler`.
     fn_refs: BTreeSet<(String, u64)>,
+    /// `(callee, argument index, closure param names)` — closures whose
+    /// parameters the callee's signature may type.
+    closures: Vec<(ClosureCallee, usize, Vec<String>)>,
 }
 
 fn call_names(block: &syn::Block) -> BodyFacts {
@@ -817,9 +939,16 @@ fn call_names(block: &syn::Block) -> BodyFacts {
                     line: line_of(node),
                 });
             }
-            for arg in &node.args {
+            for (i, arg) in node.args.iter().enumerate() {
                 if let Some(name) = bare_fn_arg(arg) {
                     self.0.fn_refs.insert((name, line_of(node)));
+                }
+                if let (Some(params), syn::Expr::Path(p)) = (closure_params(arg), &*node.func)
+                    && p.qself.is_none()
+                {
+                    self.0
+                        .closures
+                        .push((ClosureCallee::Path(path_of(&p.path)), i, params));
                 }
             }
             syn::visit::visit_expr_call(self, node);
@@ -831,9 +960,19 @@ fn call_names(block: &syn::Block) -> BodyFacts {
                 recv: recv_path(&node.receiver),
                 line: line_of(node),
             });
-            for arg in &node.args {
+            for (i, arg) in node.args.iter().enumerate() {
                 if let Some(name) = bare_fn_arg(arg) {
                     self.0.fn_refs.insert((name, line_of(node)));
+                }
+                if let Some(params) = closure_params(arg) {
+                    self.0.closures.push((
+                        ClosureCallee::Method {
+                            recv: recv_path(&node.receiver),
+                            name: node.method.to_string(),
+                        },
+                        i,
+                        params,
+                    ));
                 }
             }
             syn::visit::visit_expr_method_call(self, node);
@@ -1118,6 +1257,11 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut pending_insts: Vec<(String, String, u64)> = Vec::new();
     // Functions passed as values, caller-attributed.
     let mut pending_fn_refs: Vec<(String, String, u64)> = Vec::new();
+    // Closure typing: what each callable declares for its closure args
+    // (types resolved in the DECLARING file's context), and where closures
+    // were handed over.
+    let mut closure_sig_map: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
+    let mut pending_closures: Vec<(String, ClosureCallee, usize, Vec<String>)> = Vec::new();
 
     let aliases = build_aliases(&files, &declared);
 
@@ -1158,6 +1302,21 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         }
         for (caller, name, line) in &f.fn_refs {
             pending_fn_refs.push((caller.clone(), name.clone(), *line));
+        }
+        for (fn_key, idx, args) in &f.closure_sigs {
+            closure_sig_map.insert(
+                (fn_key.clone(), *idx),
+                args.iter()
+                    .map(|a| expand_path(a, &imports, &f.module))
+                    .collect(),
+            );
+        }
+        for (caller, callee, idx, params) in &f.closure_uses {
+            let callee = match callee {
+                ClosureCallee::Path(p) => ClosureCallee::Path(expand_path(p, &imports, &f.module)),
+                m @ ClosureCallee::Method { .. } => m.clone(),
+            };
+            pending_closures.push((caller.clone(), callee, *idx, params.clone()));
         }
         for (trait_key, written, line) in &f.trait_bases {
             let target = resolve(
@@ -1360,6 +1519,19 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                         .entry((mkey.clone(), ident.clone()))
                         .or_insert(expanded);
                 }
+                for (idx, args) in &m.closure_sigs {
+                    closure_sig_map.insert(
+                        (mkey.clone(), *idx),
+                        args.iter().map(|a| deself(a)).collect(),
+                    );
+                }
+                for (callee, idx, params) in &m.closures {
+                    let callee = match callee {
+                        ClosureCallee::Path(p) => ClosureCallee::Path(deself(p)),
+                        other => other.clone(),
+                    };
+                    pending_closures.push((mkey.clone(), callee, *idx, params.clone()));
+                }
                 impl_calls.extend(m.calls.iter().map(|c| {
                     let path = c.path.as_deref().map(&deself);
                     (
@@ -1468,6 +1640,64 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // already typed the same way, `?`/`.unwrap()` peeling a `Result`/`Option`
     // along the way. Every step reads something the source wrote — a miss at
     // any of them falls to the ledger, never to a guess.
+    // Closure parameters typed by the callee's declared bound (the model_pbt
+    // gap): resolve where each closure went, read the `Fn(...)` types its
+    // signature states, and hand them to the caller's locals — computed
+    // against a first Typing view, merged, then the view rebuilt.
+    {
+        let typing = Typing {
+            declared: &declared,
+            fns: &fns,
+            types: &types,
+            scopes: &scopes,
+            aliases: &aliases,
+            returns_map: &returns_map,
+            local_inits: &local_inits,
+            fields_map: &fields_map,
+            impls_of: &impls_of,
+            trait_impl_methods: &trait_impl_methods,
+        };
+        let mut derived: Vec<((String, String), LocalHint)> = Vec::new();
+        for (caller, callee, idx, params) in &pending_closures {
+            let module = scopes.get(caller).cloned().unwrap_or_default();
+            let fn_key = match callee {
+                ClosureCallee::Path(p) => {
+                    if declared.contains(p) {
+                        Some(p.clone())
+                    } else if p.contains("::") {
+                        resolve_relative(p, &module, &aliases, &declared)
+                    } else {
+                        fns.get(p.as_str())
+                            .and_then(|cands| pick_in_scope(&module, cands, &scopes))
+                            .cloned()
+                    }
+                }
+                ClosureCallee::Method { recv, name } => {
+                    let ty = match recv.as_deref() {
+                        Some("self") => owner_of(caller),
+                        Some(r) => typing.local_type(caller, r, 6),
+                        None => None,
+                    };
+                    ty.and_then(|t| typing.method_target(&t, name).map(|(k, _)| k))
+                }
+            };
+            let Some(fn_key) = fn_key else { continue };
+            let Some(args) = closure_sig_map.get(&(fn_key.clone(), *idx)) else {
+                continue;
+            };
+            let fmodule = scopes.get(&fn_key).cloned().unwrap_or_default();
+            for (pname, written) in params.iter().zip(args) {
+                if let Some(ty) = typing.type_key(written, &fmodule) {
+                    derived.push(((caller.clone(), pname.clone()), LocalHint::Typed(ty)));
+                }
+            }
+        }
+        drop(typing);
+        for (key, hint) in derived {
+            local_inits.entry(key).or_insert(hint);
+        }
+    }
+
     let typing = Typing {
         declared: &declared,
         fns: &fns,

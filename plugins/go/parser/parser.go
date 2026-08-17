@@ -665,6 +665,23 @@ func (w *walker) hints(caller string, body *ast.BlockStmt) {
 	}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch st := n.(type) {
+		case *ast.FuncLit:
+			// A closure's parameters are explicitly typed in Go, and its
+			// calls attribute to the enclosing function — so its typed
+			// params are that function's hints too.
+			if st.Type.Params != nil {
+				for _, field := range st.Type.Params.List {
+					alias, tname, ok := typeRef(field.Type)
+					if !ok {
+						continue
+					}
+					for _, id := range field.Names {
+						if id.Name != "_" {
+							w.hint(Hint{Caller: caller, Name: id.Name, TypeAlias: alias, TypeName: tname})
+						}
+					}
+				}
+			}
 		case *ast.AssignStmt:
 			if st.Tok != token.DEFINE || len(st.Lhs) == 0 {
 				return true

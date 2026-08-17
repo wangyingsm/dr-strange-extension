@@ -176,6 +176,12 @@ pub struct FileFacts {
     pub hints: Vec<Hint>,
     /// `(caller, bare name, line)` — functions passed as call arguments.
     pub fn_refs: Vec<(String, u64, String)>,
+    /// `(caller, callee bare name, arg index, callback param names)` —
+    /// inline callbacks whose params the callee's annotation may type.
+    pub callback_uses: Vec<(String, String, usize, Vec<String>)>,
+    /// `(fn key, arg index, declared callback-arg types)` from signatures
+    /// whose params are function-typed (`cb: (x: Foo) => void`).
+    pub callback_sigs: Vec<(String, usize, Vec<String>)>,
     /// `(callable key, declared return as written)` when it names a plain
     /// class — `Promise<T>` unwraps to `T`, which is what an async factory
     /// hands the awaiter.
@@ -754,6 +760,57 @@ impl Walker<'_> {
         }
     }
 
+    /// An inline callback argument's parameter names — plain idents only.
+    fn callback_params(e: &ast::Expr) -> Option<Vec<String>> {
+        let pats: Vec<&ast::Pat> = match e {
+            ast::Expr::Arrow(a) => a.params.iter().collect(),
+            ast::Expr::Fn(f) => f.function.params.iter().map(|p| &p.pat).collect(),
+            _ => return None,
+        };
+        let names = pats
+            .iter()
+            .map(|p| match p {
+                ast::Pat::Ident(b) => Some(b.id.sym.to_string()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!names.is_empty()).then_some(names)
+    }
+
+    /// The callback-argument types a signature declares, per parameter
+    /// position — a param annotated with a function type states them.
+    fn callback_sig(&self, params: &[ast::Param]) -> Vec<(usize, Vec<String>)> {
+        let mut out = Vec::new();
+        for (i, param) in params.iter().enumerate() {
+            let ast::Pat::Ident(b) = &param.pat else {
+                continue;
+            };
+            let Some(ann) = &b.type_ann else { continue };
+            let ast::TsType::TsFnOrConstructorType(ast::TsFnOrConstructorType::TsFnType(f)) =
+                &*ann.type_ann
+            else {
+                continue;
+            };
+            let args = f
+                .params
+                .iter()
+                .map(|p| match p {
+                    ast::TsFnParam::Ident(b) => b
+                        .type_ann
+                        .as_ref()
+                        .and_then(|a| Self::type_written(&a.type_ann)),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(args) = args
+                && !args.is_empty()
+            {
+                out.push((i, args));
+            }
+        }
+        out
+    }
+
     fn hint(&mut self, caller: &str, name: String, written: String, constructed: bool) {
         if !self
             .facts
@@ -786,6 +843,11 @@ impl Walker<'_> {
             && let Some(written) = Self::type_written(&ret.type_ann)
         {
             self.facts.returns.push((caller.to_string(), written));
+        }
+        for (idx, args) in self.callback_sig(&f.params) {
+            self.facts
+                .callback_sigs
+                .push((caller.to_string(), idx, args));
         }
         if let Some(body) = &f.body {
             self.body_hints(caller, body);
@@ -1505,6 +1567,21 @@ impl CallCollector<'_, '_> {
             }
         }
     }
+
+    fn callback_uses(&mut self, callee: &ast::Expr, args: &[ast::ExprOrSpread]) {
+        let ast::Expr::Ident(f) = callee else { return };
+        for (i, a) in args.iter().enumerate() {
+            if a.spread.is_none()
+                && let Some(params) = Walker::callback_params(&a.expr)
+            {
+                let caller = self.caller.clone();
+                self.walker
+                    .facts
+                    .callback_uses
+                    .push((caller, f.sym.to_string(), i, params));
+            }
+        }
+    }
 }
 
 impl Visit for CallCollector<'_, '_> {
@@ -1581,6 +1658,9 @@ impl Visit for CallCollector<'_, '_> {
             }
         }
         self.arg_refs(&node.args, node.span);
+        if let ast::Callee::Expr(callee) = &node.callee {
+            self.callback_uses(callee, &node.args);
+        }
         node.visit_children_with(self);
     }
 

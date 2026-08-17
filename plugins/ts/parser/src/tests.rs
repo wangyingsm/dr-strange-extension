@@ -870,3 +870,31 @@ fn functions_passed_as_values_become_references() {
         "no self-loop"
     );
 }
+
+/// A user HOF's function-typed parameter annotation types the inline
+/// callback's parameter — cross-file through the import too.
+#[test]
+fn callback_params_type_through_the_callees_annotation() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "p" }"#),
+        (
+            "lib.ts",
+            "export class Foo { run(): number { return 1; } }\nexport function withFoo(cb: (x: Foo) => void): void { cb(new Foo()); }\n",
+        ),
+        (
+            "app.ts",
+            "import { withFoo } from './lib';\nexport function go(): void { withFoo((x) => { x.run(); }); }\n",
+        ),
+    ]));
+    assert!(
+        a.edges
+            .iter()
+            .any(|e| e.ty == "CALLS" && e.src == "p/app.go" && e.dst == "p/lib.Foo.run"),
+        "{:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+}

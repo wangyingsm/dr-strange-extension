@@ -794,3 +794,17 @@ func TestFunctionsPassedAsValuesBecomeReferences(t *testing.T) {
 		t.Fatalf("no self-loop: %v", a.Edges)
 	}
 }
+
+// A closure's explicitly-typed parameter types receiver calls inside it —
+// the calls already attribute to the enclosing function.
+func TestClosureParamsTypeReceivers(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"t.go": "package m\n\ntype Plane struct{}\n\nfunc (p *Plane) Wipe() {}\n\n" +
+			"func onAll(f func(p *Plane)) {}\n\n" +
+			"func apply() { onAll(func(p *Plane) { p.Wipe() }) }\n",
+	}})
+	if !hasEdge(a, "m.apply", "CALLS", "m.Plane.Wipe") {
+		t.Fatalf("a typed closure param dispatches: %v", a.Edges)
+	}
+}

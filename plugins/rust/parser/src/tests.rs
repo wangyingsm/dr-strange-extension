@@ -1849,3 +1849,38 @@ fn functions_passed_as_values_become_references() {
         "no self-loop"
     );
 }
+
+/// The model_pbt gap, as a fixture: a closure's parameter typed by the
+/// callee's declared `Fn(...)` bound — impl-trait, generic-with-bound, and
+/// where-clause forms all state the type.
+#[test]
+fn closure_params_type_through_the_callees_declared_bound() {
+    let t = Tree::new("bl-closure");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n").write(
+        "src/lib.rs",
+        concat!(
+            "pub struct Plane;\nimpl Plane { pub fn wipe(&self) {} }\n",
+            "pub struct Harness;\n",
+            "impl Harness {\n",
+            "    pub fn on_all(&self, f: impl Fn(&Plane)) { let _ = f; }\n",
+            "    pub fn apply(&self) { self.on_all(|p| p.wipe()); }\n",
+            "}\n",
+            "pub fn each<F: Fn(&Plane)>(f: F) { let _ = f; }\n",
+            "pub fn run() { each(|p| p.wipe()); }\n",
+            "pub fn each_where<F>(f: F) where F: Fn(&Plane) { let _ = f; }\n",
+            "pub fn run_where() { each_where(|p| p.wipe()); }\n",
+        ),
+    );
+    let a = run(&t);
+    assert!(
+        has_edge(&a, "k::Harness::apply", "CALLS", "k::Plane::wipe"),
+        "impl-Fn bound types the closure param: {:?}",
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS")
+            .map(|e| (e.src.as_str(), e.dst.as_str()))
+            .collect::<Vec<_>>()
+    );
+    assert!(has_edge(&a, "k::run", "CALLS", "k::Plane::wipe"));
+    assert!(has_edge(&a, "k::run_where", "CALLS", "k::Plane::wipe"));
+}

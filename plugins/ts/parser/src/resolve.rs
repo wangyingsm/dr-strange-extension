@@ -372,6 +372,72 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // Callback parameters typed by the callee's declared function-typed
+    // param annotation: resolve where each inline callback went, read the
+    // annotation's arg classes, hand them to the caller's names.
+    let mut callback_sig_ix: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
+    for f in &all {
+        for (fn_key, idx, args) in &f.callback_sigs {
+            callback_sig_ix.insert((fn_key.clone(), *idx), args.clone());
+        }
+    }
+    for f in &all {
+        let bindings = file_bindings(f);
+        for (caller, callee, idx, params) in &f.callback_uses {
+            // The callee: declared here, or an imported callable.
+            let fn_key = match ix.decls.get(&f.module_id).and_then(|d| d.get(callee)) {
+                Some((key, callable)) if *callable => Some(key.clone()),
+                _ => match bindings.get(callee.as_str()) {
+                    Some((imported, spec)) if *imported != "*" => {
+                        match ix.resolve_spec(&f.file, spec) {
+                            Resolved::Module(target) => {
+                                let n = if *imported == "default" {
+                                    "default"
+                                } else {
+                                    imported
+                                };
+                                ix.lookup_export(&target, n, 0)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+            };
+            let Some(fn_key) = fn_key else { continue };
+            let Some(args) = callback_sig_ix.get(&(fn_key, *idx)) else {
+                continue;
+            };
+            // The annotation was written in the callee's file; resolve the
+            // class there — a declaring file knows its own imports.
+            let decl_file = all.iter().find(|df| {
+                df.callback_sigs.iter().any(|(k, _, _)| {
+                    ix.decls
+                        .get(&df.module_id)
+                        .and_then(|d| d.get(callee))
+                        .map(|(key, _)| key == k)
+                        .unwrap_or(false)
+                })
+            });
+            for (pname, written) in params.iter().zip(args) {
+                let class = match decl_file {
+                    Some(df) => {
+                        let db = file_bindings(df);
+                        type_decl(df, &db, written)
+                    }
+                    None => type_decl(f, &bindings, written),
+                };
+                if let Some(class) = class
+                    && classes.contains(&class)
+                {
+                    hint_ix
+                        .entry((caller.clone(), pname.clone()))
+                        .or_insert(class);
+                }
+            }
+        }
+    }
+
     // The method a class answers `name` with: its own, else the base
     // chain's, depth-capped.
     fn method_walk(
