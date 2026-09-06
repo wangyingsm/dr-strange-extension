@@ -1,0 +1,9 @@
+# The hundred-line limit, the same one the database repository holds itself to.
+# Clippy has no way to carry a lint configuration in a manifest, so the limit
+# and the lint that enforces it live in two places; changing one without the
+# other is the mistake to watch for.
+#
+# One file at the root rather than one per crate: these are standalone
+# workspaces by design (each plugin ships at its own pace), and clippy walks up
+# from the crate it is checking to find this.
+too-many-lines-threshold = 100

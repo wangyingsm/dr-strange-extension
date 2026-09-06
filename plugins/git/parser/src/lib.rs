@@ -225,25 +225,7 @@ pub fn read_history(files: &dyn Files, opts: &Options) -> Result<History, String
 
     let mut odb = Odb::open(files, &listing);
 
-    // ---- refs, with annotated tags peeled to the commit they name ---------
-    let mut branches: Vec<(RawRef, bool)> = Vec::new();
-    let mut tags: Vec<(RawRef, String, Option<object::Tag>)> = Vec::new();
-    for r in &all_refs {
-        if let Some(name) = r.name.strip_prefix("refs/tags/") {
-            let _ = name;
-            if !opts.tags {
-                continue;
-            }
-            let (target, tag) = peel(files, &mut odb, r);
-            tags.push((r.clone(), target, tag));
-        } else if r.name.starts_with("refs/remotes/") {
-            if opts.remotes {
-                branches.push((r.clone(), true));
-            }
-        } else if r.name.starts_with("refs/heads/") {
-            branches.push((r.clone(), false));
-        }
-    }
+    let (branches, tags) = collect_refs(files, &mut odb, &all_refs, opts);
 
     // ---- which commits to read -------------------------------------------
     // The tips of everything: refs first, so a truncated read keeps what a
@@ -292,153 +274,10 @@ pub fn read_history(files: &dyn Files, opts: &Options) -> Result<History, String
     // otherwise look like a branch pointing at nothing on purpose.
     let mut dropped = 0usize;
 
-    // ---- commits ---------------------------------------------------------
-    for oid in &walk.order {
-        let commit = &walk.commits[oid];
-        let is_merge = commit.parents.len() > 1;
-        if is_merge {
-            out.summary.merges += 1;
-        }
-        let seen = reachable.contains(oid);
-        if !seen {
-            out.summary.unreachable += 1;
-        }
-        out.nodes.push(commit_node(commit, opts, seen));
-        for (i, parent) in commit.parents.iter().enumerate() {
-            if !walk.selected.contains(parent) {
-                dropped += 1;
-                continue;
-            }
-            out.edges.push(Edge {
-                src: commit_key(oid),
-                dst: commit_key(parent),
-                ty: "PARENT".into(),
-                props: props([(
-                    "order",
-                    described(
-                        "which parent this is, counting from 1 — the first is the \
-                         line the commit was made on, the rest are what a merge \
-                         brought in",
-                        json!(i as i64 + 1),
-                    ),
-                )]),
-            });
-        }
-    }
-    out.summary.commits = walk.order.len();
-
-    // ---- branches and tags -----------------------------------------------
-    for (r, remote) in &branches {
-        if *remote {
-            out.summary.remote_branches += 1;
-        } else {
-            out.summary.branches += 1;
-        }
-        let is_head = matches!(&head, Some(Head::OnBranch(name)) if name == &r.name);
-        out.nodes.push(branch_node(r, *remote, is_head));
-        if walk.selected.contains(&r.oid) {
-            out.edges
-                .push(edge(branch_key(&r.name), "TIP", commit_key(&r.oid)));
-        } else {
-            dropped += 1;
-        }
-    }
-    for (r, target, tag) in &tags {
-        out.summary.tags += 1;
-        out.nodes.push(tag_node(r, target, tag.as_ref()));
-        if walk.selected.contains(target) {
-            out.edges
-                .push(edge(tag_key(&r.name), "TAGS", commit_key(target)));
-        } else {
-            dropped += 1;
-        }
-    }
-
-    // ---- rebases ---------------------------------------------------------
+    emit_commits(&mut out, &walk, &reachable, opts, &mut dropped);
+    emit_refs(&mut out, &branches, &tags, &walk, &head, &mut dropped);
     if opts.reflog {
-        let runs = reflog::find_rebases(&logs);
-        out.summary.rebases = runs.len();
-        let known: BTreeSet<&str> = branches.iter().map(|(r, _)| r.name.as_str()).collect();
-        let mut used: BTreeSet<String> = BTreeSet::new();
-        for run in &runs {
-            // Two rebases of one branch within the same second would key
-            // alike; the second gets a suffix rather than overwriting the
-            // first.
-            let base = format!(
-                "rebase:{}@{}",
-                if run.refname.is_empty() {
-                    "HEAD"
-                } else {
-                    &run.refname
-                },
-                if run.completed {
-                    &run.finished_at
-                } else {
-                    &run.started_at
-                }
-            );
-            let mut key = base.clone();
-            let mut n = 1;
-            while !used.insert(key.clone()) {
-                n += 1;
-                key = format!("{base}#{n}");
-            }
-            out.nodes.push(rebase_node(&key, run));
-
-            let mut to = |oid: &str, ty: &str| {
-                if walk.selected.contains(oid) {
-                    out.edges.push(edge(key.clone(), ty, commit_key(oid)));
-                } else if !oid.is_empty() {
-                    dropped += 1;
-                }
-            };
-            to(&run.onto, "ONTO");
-            to(&run.replaced, "REPLACED");
-            to(&run.result, "RESULT");
-            for (i, step) in run.produced.iter().enumerate() {
-                if !walk.selected.contains(&step.oid) {
-                    dropped += 1;
-                    continue;
-                }
-                out.edges.push(Edge {
-                    src: key.clone(),
-                    dst: commit_key(&step.oid),
-                    ty: "PRODUCED".into(),
-                    props: props([
-                        (
-                            "step",
-                            described(
-                                "position in the replay, counting from 1",
-                                json!(i as i64 + 1),
-                            ),
-                        ),
-                        (
-                            "kind",
-                            described(
-                                "what the reflog called this step: pick, squash, fixup, reword…",
-                                json!(step.kind),
-                            ),
-                        ),
-                    ]),
-                });
-            }
-            if known.contains(run.refname.as_str()) {
-                out.edges
-                    .push(edge(key.clone(), "ON", branch_key(&run.refname)));
-            }
-        }
-        out.notes.push(if logs.is_empty() {
-            "this clone has no reflog, so no rebase can be seen — a fresh clone, \
-             a bare repository, or `core.logAllRefUpdates` turned off"
-                .to_string()
-        } else {
-            format!(
-                "{} rebase(s) reconstructed from the reflog, which is local to this \
-                 clone and expires (gc.reflogExpire, 90 days by default) — a rewrite \
-                 older than that left no record anywhere and is not in this graph",
-                runs.len()
-            )
-        });
+        emit_rebases(&mut out, &logs, &branches, &walk, &mut dropped);
     }
 
     if dropped > 0 {
@@ -464,6 +303,212 @@ pub fn read_history(files: &dyn Files, opts: &Options) -> Result<History, String
             .push("this repository has no commits yet".to_string());
     }
     Ok(out)
+}
+
+/// A branch ref, and whether it is remote-tracking.
+type Branches = Vec<(RawRef, bool)>;
+/// A tag ref, the commit it peels to, and the tag object when it is annotated.
+type Tags = Vec<(RawRef, String, Option<object::Tag>)>;
+
+/// The refs worth keeping, with annotated tags peeled to the commit they name.
+fn collect_refs(
+    files: &dyn Files,
+    odb: &mut Odb,
+    all_refs: &[RawRef],
+    opts: &Options,
+) -> (Branches, Tags) {
+    let mut branches: Vec<(RawRef, bool)> = Vec::new();
+    let mut tags: Vec<(RawRef, String, Option<object::Tag>)> = Vec::new();
+    for r in all_refs {
+        if let Some(name) = r.name.strip_prefix("refs/tags/") {
+            let _ = name;
+            if !opts.tags {
+                continue;
+            }
+            let (target, tag) = peel(files, odb, r);
+            tags.push((r.clone(), target, tag));
+        } else if r.name.starts_with("refs/remotes/") {
+            if opts.remotes {
+                branches.push((r.clone(), true));
+            }
+        } else if r.name.starts_with("refs/heads/") {
+            branches.push((r.clone(), false));
+        }
+    }
+
+    (branches, tags)
+}
+
+/// One node per commit, and a `PARENT` edge per parent that is in this graph.
+fn emit_commits(
+    out: &mut History,
+    walk: &Walk,
+    reachable: &BTreeSet<String>,
+    opts: &Options,
+    dropped: &mut usize,
+) {
+    for oid in &walk.order {
+        let commit = &walk.commits[oid];
+        let is_merge = commit.parents.len() > 1;
+        if is_merge {
+            out.summary.merges += 1;
+        }
+        let seen = reachable.contains(oid);
+        if !seen {
+            out.summary.unreachable += 1;
+        }
+        out.nodes.push(commit_node(commit, opts, seen));
+        for (i, parent) in commit.parents.iter().enumerate() {
+            if !walk.selected.contains(parent) {
+                *dropped += 1;
+                continue;
+            }
+            out.edges.push(Edge {
+                src: commit_key(oid),
+                dst: commit_key(parent),
+                ty: "PARENT".into(),
+                props: props([(
+                    "order",
+                    described(
+                        "which parent this is, counting from 1 — the first is the \
+                         line the commit was made on, the rest are what a merge \
+                         brought in",
+                        json!(i as i64 + 1),
+                    ),
+                )]),
+            });
+        }
+    }
+    out.summary.commits = walk.order.len();
+}
+
+/// Branch and tag nodes, each pointing at its commit when that commit was read.
+fn emit_refs(
+    out: &mut History,
+    branches: &[(RawRef, bool)],
+    tags: &[(RawRef, String, Option<object::Tag>)],
+    walk: &Walk,
+    head: &Option<Head>,
+    dropped: &mut usize,
+) {
+    for (r, remote) in branches {
+        if *remote {
+            out.summary.remote_branches += 1;
+        } else {
+            out.summary.branches += 1;
+        }
+        let is_head = matches!(&head, Some(Head::OnBranch(name)) if name == &r.name);
+        out.nodes.push(branch_node(r, *remote, is_head));
+        if walk.selected.contains(&r.oid) {
+            out.edges
+                .push(edge(branch_key(&r.name), "TIP", commit_key(&r.oid)));
+        } else {
+            *dropped += 1;
+        }
+    }
+    for (r, target, tag) in tags {
+        out.summary.tags += 1;
+        out.nodes.push(tag_node(r, target, tag.as_ref()));
+        if walk.selected.contains(target) {
+            out.edges
+                .push(edge(tag_key(&r.name), "TAGS", commit_key(target)));
+        } else {
+            *dropped += 1;
+        }
+    }
+}
+
+/// The rebases the reflog remembers, and the caveat that goes with them.
+fn emit_rebases(
+    out: &mut History,
+    logs: &BTreeMap<String, Vec<reflog::LogEntry>>,
+    branches: &[(RawRef, bool)],
+    walk: &Walk,
+    dropped: &mut usize,
+) {
+    let runs = reflog::find_rebases(logs);
+    out.summary.rebases = runs.len();
+    let known: BTreeSet<&str> = branches.iter().map(|(r, _)| r.name.as_str()).collect();
+    let mut used: BTreeSet<String> = BTreeSet::new();
+    for run in &runs {
+        // Two rebases of one branch within the same second would key
+        // alike; the second gets a suffix rather than overwriting the
+        // first.
+        let base = format!(
+            "rebase:{}@{}",
+            if run.refname.is_empty() {
+                "HEAD"
+            } else {
+                &run.refname
+            },
+            if run.completed {
+                &run.finished_at
+            } else {
+                &run.started_at
+            }
+        );
+        let mut key = base.clone();
+        let mut n = 1;
+        while !used.insert(key.clone()) {
+            n += 1;
+            key = format!("{base}#{n}");
+        }
+        out.nodes.push(rebase_node(&key, run));
+
+        let mut to = |oid: &str, ty: &str| {
+            if walk.selected.contains(oid) {
+                out.edges.push(edge(key.clone(), ty, commit_key(oid)));
+            } else if !oid.is_empty() {
+                *dropped += 1;
+            }
+        };
+        to(&run.onto, "ONTO");
+        to(&run.replaced, "REPLACED");
+        to(&run.result, "RESULT");
+        for (i, step) in run.produced.iter().enumerate() {
+            if !walk.selected.contains(&step.oid) {
+                *dropped += 1;
+                continue;
+            }
+            out.edges.push(Edge {
+                src: key.clone(),
+                dst: commit_key(&step.oid),
+                ty: "PRODUCED".into(),
+                props: props([
+                    (
+                        "step",
+                        described(
+                            "position in the replay, counting from 1",
+                            json!(i as i64 + 1),
+                        ),
+                    ),
+                    (
+                        "kind",
+                        described(
+                            "what the reflog called this step: pick, squash, fixup, reword…",
+                            json!(step.kind),
+                        ),
+                    ),
+                ]),
+            });
+        }
+        if known.contains(run.refname.as_str()) {
+            out.edges
+                .push(edge(key.clone(), "ON", branch_key(&run.refname)));
+        }
+    }
+    out.notes.push(if logs.is_empty() {
+        "this clone has no reflog, so no rebase can be seen — a fresh clone, \
+         a bare repository, or `core.logAllRefUpdates` turned off"
+            .to_string()
+    } else {
+        format!(
+            "{} rebase(s) reconstructed from the reflog, which is local to this \
+             clone and expires (gc.reflogExpire, 90 days by default) — a rewrite \
+             older than that left no record anywhere and is not in this graph",
+            runs.len()
+        )
+    });
 }
 
 /// An annotated tag peeled to the commit it names, and the tag object itself.

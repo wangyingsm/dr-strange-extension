@@ -27,3 +27,6 @@ serde_json = "1"
 # not as part of the database's build graph.
 [workspace]
 members = []
+
+[lints.clippy]
+too_many_lines = "warn"

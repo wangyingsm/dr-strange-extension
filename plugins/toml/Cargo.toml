@@ -17,3 +17,6 @@ toml_edit = { version = "0.22", default-features = false, features = ["parse", "
 
 [workspace]
 members = []
+
+[lints.clippy]
+too_many_lines = "warn"

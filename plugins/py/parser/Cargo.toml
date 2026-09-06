@@ -18,3 +18,7 @@ serde_json = "1"
 
 [workspace]
 members = []
+
+# `clippy::too_many_lines` is deliberately absent here, unlike the other
+# gated crates: this parser still has functions over the limit, and turning
+# the lint on before they are split would turn CI red. Add it with them.
