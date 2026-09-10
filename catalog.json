@@ -13,10 +13,10 @@
     },
     {
       "name": "go",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "claims": ".go",
-      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/go-v2.0.0/go.wasm",
-      "sha256": "cab76a6a75b960ffbc1fa693df1fdbb23ddf41a21ae64ba450d619d43c76e36e",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/go-v2.0.1/go.wasm",
+      "sha256": "28feb0efee714e6875cd6ea1ef5a4fc116fc43fc072f964dd1b80e9ccffad1d5",
       "contract": "1.0.0",
       "min_drsg": "2.0.0"
     },
