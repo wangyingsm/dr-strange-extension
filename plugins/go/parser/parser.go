@@ -131,6 +131,10 @@ type Hint struct {
 	TypeName  string `json:"type_name,omitempty"`
 	CallAlias string `json:"call_alias,omitempty"`
 	CallName  string `json:"call_name,omitempty"`
+	// ElemOf names another binding whose element type this one takes:
+	// `for _, r := range rules` makes r ElemOf "rules". Set on its own —
+	// the type is not known here, only where to look it up.
+	ElemOf string `json:"elem_of,omitempty"`
 }
 
 // Ret records a callable's first result type when it is a plain named type
@@ -221,8 +225,13 @@ type FileFacts struct {
 	Ifaces  []Iface  `json:"ifaces,omitempty"`
 	Methods []Method `json:"methods,omitempty"`
 	Hints   []Hint   `json:"hints,omitempty"`
-	Returns []Ret    `json:"returns,omitempty"`
-	Embeds  []Embed  `json:"embeds,omitempty"`
+	// ElemHints have the same shape as Hints, but TypeName holds the
+	// *element* type of a container — the lookup an ElemOf binding needs.
+	// A separate list because a name has both: `rules` is a []Rule here
+	// and has no methods of its own there.
+	ElemHints []Hint  `json:"elem_hints,omitempty"`
+	Returns   []Ret   `json:"returns,omitempty"`
+	Embeds    []Embed `json:"embeds,omitempty"`
 	// FnRefs are functions passed as values: `register(handler)` —
 	// (caller, bare name, line), argument position only.
 	FnRefs []FnRef `json:"fn_refs,omitempty"`
@@ -526,14 +535,32 @@ func (w *walker) funcDecl(d *ast.FuncDecl) {
 				continue
 			}
 			alias, tname, ok := typeRef(field.Type)
+			ealias, ename, eok := elemRef(field.Type)
 			for _, id := range field.Names {
-				if ok && id.Name != "_" {
-					w.hint(Hint{Caller: key, Name: id.Name, TypeAlias: alias, TypeName: tname})
+				if id.Name != "_" {
+					if ok {
+						w.hint(Hint{Caller: key, Name: id.Name, TypeAlias: alias, TypeName: tname})
+					}
+					if eok {
+						w.elemHint(Hint{Caller: key, Name: id.Name, TypeAlias: ealias, TypeName: ename})
+					}
 				}
 				pos++
 			}
 			if len(field.Names) == 0 {
 				pos++ // an unnamed parameter still occupies its position
+			}
+		}
+	}
+	// The receiver's type is stated in the signature — the one binding that
+	// needs no inference at all, and until now the one that was never taken:
+	// every `recv.Method()` in the tree fell to the unresolved ledger.
+	if d.Recv != nil && len(d.Recv.List) > 0 && len(d.Recv.List[0].Names) > 0 {
+		if rn := d.Recv.List[0].Names[0].Name; rn != "" && rn != "_" {
+			// A receiver is always declared in the method's own package,
+			// so the alias is empty by construction.
+			if base := receiverBase(d.Recv.List[0].Type); base != "" {
+				w.hint(Hint{Caller: key, Name: rn, TypeName: base})
 			}
 		}
 	}
@@ -909,6 +936,40 @@ func typeRef(e ast.Expr) (alias, name string, ok bool) {
 	return "", "", false
 }
 
+// elemRef reads a container type's element type. It is deliberately separate
+// from [typeRef], which stops at the container — a slice's methods are not
+// its element's, and widening typeRef would resolve `rules.Foo()` onto
+// `Rule.Foo`, an edge that is not merely missing but wrong.
+func elemRef(e ast.Expr) (alias, name string, ok bool) {
+	switch t := e.(type) {
+	case *ast.ParenExpr:
+		return elemRef(t.X)
+	case *ast.StarExpr:
+		return elemRef(t.X)
+	case *ast.ArrayType:
+		return typeRef(t.Elt)
+	case *ast.Ellipsis:
+		return typeRef(t.Elt)
+	case *ast.MapType:
+		return typeRef(t.Value)
+	case *ast.ChanType:
+		return typeRef(t.Value)
+	}
+	return "", "", false
+}
+
+// elemInitHint reads `xs := []T{…}` — the one initializer shape that names a
+// container's element type outright. A call initializer would mean following
+// the callee's declared return into its element, which is not attempted.
+func elemInitHint(caller, name string, e ast.Expr) (Hint, bool) {
+	if v, ok := e.(*ast.CompositeLit); ok && v.Type != nil {
+		if alias, tname, ok := elemRef(v.Type); ok {
+			return Hint{Caller: caller, Name: name, TypeAlias: alias, TypeName: tname}, true
+		}
+	}
+	return Hint{}, false
+}
+
 // typeNames reads every named type a type expression mentions, outermost
 // first: `map[string]*Job` yields `string` and `Job`, `chan Event` yields
 // `Event`, `Cache[Key, Job]` yields all three.
@@ -1017,6 +1078,17 @@ func (w *walker) hint(h Hint) {
 	w.facts.Hints = append(w.facts.Hints, h)
 }
 
+// elemHint records a container's element type, first writing wins — the same
+// discipline as [walker.hint], on the separate list ElemOf bindings read.
+func (w *walker) elemHint(h Hint) {
+	for _, have := range w.facts.ElemHints {
+		if have.Caller == h.Caller && have.Name == h.Name {
+			return
+		}
+	}
+	w.facts.ElemHints = append(w.facts.ElemHints, h)
+}
+
 // hints walks a body for the locals whose type the source states: typed
 // `var` declarations, `:=` with a composite-literal or call initializer —
 // the first value of a multi-assign takes the call's first result.
@@ -1055,6 +1127,9 @@ func (w *walker) hints(caller string, body *ast.BlockStmt) {
 				if h, ok := initHint(caller, first.Name, st.Rhs[0]); ok {
 					w.hint(h)
 				}
+				if h, ok := elemInitHint(caller, first.Name, st.Rhs[0]); ok {
+					w.elemHint(h)
+				}
 			}
 		case *ast.DeclStmt:
 			gd, ok := st.Decl.(*ast.GenDecl)
@@ -1074,12 +1149,30 @@ func (w *walker) hints(caller string, body *ast.BlockStmt) {
 						if alias, tname, ok := typeRef(vs.Type); ok {
 							w.hint(Hint{Caller: caller, Name: id.Name, TypeAlias: alias, TypeName: tname})
 						}
+						if alias, tname, ok := elemRef(vs.Type); ok {
+							w.elemHint(Hint{Caller: caller, Name: id.Name, TypeAlias: alias, TypeName: tname})
+						}
 					} else if i < len(vs.Values) {
 						if h, ok := initHint(caller, id.Name, vs.Values[i]); ok {
 							w.hint(h)
 						}
 					}
 				}
+			}
+		case *ast.RangeStmt:
+			if st.Tok != token.DEFINE {
+				return true
+			}
+			// The range expression has to be a bare name: that is the only
+			// shape whose element type is already written down somewhere.
+			src, ok := st.X.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			// Key is skipped on purpose — a slice's is `int`, and a map's
+			// would need a table of its own for a shape that does not occur.
+			if v, vok := st.Value.(*ast.Ident); vok && v.Name != "_" {
+				w.hint(Hint{Caller: caller, Name: v.Name, ElemOf: src.Name})
 			}
 		}
 		return true

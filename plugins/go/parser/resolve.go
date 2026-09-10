@@ -25,6 +25,18 @@ var builtins = map[string]bool{
 	"println": true, "real": true, "recover": true,
 }
 
+// predeclaredTypes are the type names the language predeclares. Written as
+// `T(x)` they are conversions, not calls — and named as a receiver's type
+// they belong to no package, which is why the resolver checks this table in
+// two places rather than folding it into builtins.
+var predeclaredTypes = map[string]bool{
+	"bool": true, "string": true, "error": true, "any": true,
+	"int": true, "int8": true, "int16": true, "int32": true, "int64": true,
+	"uint": true, "uint8": true, "uint16": true, "uint32": true, "uint64": true,
+	"uintptr": true, "byte": true, "rune": true,
+	"float32": true, "float64": true, "complex64": true, "complex128": true,
+}
+
 // stamped is a CALLS edge carrying the family's resolution stamps: which
 // strategy bound it, how certain that strategy is, and what the source wrote.
 func stamped(src, dst string, line int, strategy, band, written string) Edge {
@@ -231,6 +243,7 @@ func Assemble(all []FileFacts) Assembled {
 		callKey  string
 		callRecv string
 		callName string
+		elemOf   string
 	}
 	// One type position a declaration writes down, before it is known whether
 	// the type it names is one this tree declares.
@@ -238,6 +251,7 @@ func Assemble(all []FileFacts) Assembled {
 	var typeUses []typeUse
 	returns := map[string]string{} // callable key → first-result type key
 	locals := map[string]binding{} // caller\x00name
+	elems := map[string]binding{}  // caller\x00name → that container's element type
 	pkgVars := map[string]binding{}
 	embeds := map[string][]string{}
 	for fi := range all {
@@ -274,7 +288,17 @@ func Assemble(all []FileFacts) Assembled {
 		for _, h := range f.Hints {
 			var b binding
 			switch {
+			case h.ElemOf != "":
+				b.elemOf = h.ElemOf
 			case h.TypeName != "":
+				// A predeclared type belongs to no package: qualifying it
+				// would invent `<pkg>.error`. Unless this package actually
+				// declares a type by that name — legal, and then it wins.
+				if h.TypeAlias == "" && predeclaredTypes[h.TypeName] {
+					if d, ok := pkgs[f.PkgPath]; !ok || !d.types[h.TypeName] {
+						continue
+					}
+				}
 				b.typeKey = resolveType(h.TypeAlias, h.TypeName)
 				if b.typeKey == "" {
 					continue
@@ -300,6 +324,26 @@ func Assemble(all []FileFacts) Assembled {
 			}
 			if _, have := locals[k]; !have {
 				locals[k] = b
+			}
+		}
+		for _, h := range f.ElemHints {
+			if h.TypeName == "" {
+				continue
+			}
+			// Same guard as Hints: a predeclared element type belongs to
+			// no package, so `[]string` must not become `<pkg>.string`.
+			if h.TypeAlias == "" && predeclaredTypes[h.TypeName] {
+				if d, ok := pkgs[f.PkgPath]; !ok || !d.types[h.TypeName] {
+					continue
+				}
+			}
+			tk := resolveType(h.TypeAlias, h.TypeName)
+			if tk == "" {
+				continue
+			}
+			k := h.Caller + "\x00" + h.Name
+			if _, have := elems[k]; !have {
+				elems[k] = binding{typeKey: tk}
 			}
 		}
 		for _, e := range f.Embeds {
@@ -394,6 +438,12 @@ func Assemble(all []FileFacts) Assembled {
 			switch {
 			case b.typeKey != "":
 				return b.typeKey, true
+			case b.elemOf != "":
+				eb, ok := elems[caller+"\x00"+b.elemOf]
+				if !ok || eb.typeKey == "" {
+					return "", false
+				}
+				return eb.typeKey, true
 			case b.callKey != "":
 				tk, ok := returns[b.callKey]
 				return tk, ok
@@ -428,7 +478,7 @@ func Assemble(all []FileFacts) Assembled {
 					if len(c.Args) > 0 {
 						handovers = append(handovers, handover{c.Caller, key, c.Args})
 					}
-				} else if !d.types[c.Name] { // a conversion is not a call
+				} else if !d.types[c.Name] && !predeclaredTypes[c.Name] { // a conversion is not a call
 					unresolved++
 					ledger(f, c.Caller, c.Name, c.Line, "name not declared in this package")
 				}
@@ -448,6 +498,22 @@ func Assemble(all []FileFacts) Assembled {
 						}
 						continue
 					}
+					if _, ours := seen[tk]; !ours {
+						// Typed, but not by this tree: the same position a
+						// package-level external call is in, so the same
+						// treatment — a stand-in and an edge, not a ledger
+						// entry claiming the receiver was untypeable.
+						key := tk + "." + c.Name
+						note(key, "Function")
+						addEdge(mark(stamped(c.Caller, key, c.Line, "external-method", "high", written)))
+						externalCalls++
+						continue
+					}
+					// A type this tree does declare, with no such method:
+					// a real gap, and the reason has to say which type.
+					unresolved++
+					ledger(f, c.Caller, written, c.Line, "method not found on "+tk)
+					continue
 				}
 				unresolved++
 				ledger(f, c.Caller, written, c.Line, "method call: receiver type unknown")

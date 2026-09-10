@@ -1115,3 +1115,131 @@ func nodeProps(t *testing.T, a Assembled, key string) Props {
 	t.Helper()
 	return node(t, a, key).Props
 }
+
+// `string(b)` 是转换不是调用。builtins 只列了内建函数，预声明的类型名
+// 是另一张表——少了它，每一次 []byte→string 都会记成一条未解析调用。
+func TestPredeclaredConversionsAreNotCalls(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go":   "package m\n\nfunc Use(b []byte) string { return string(b) }\n",
+	}})
+	for _, e := range a.Edges {
+		if e.Type == "CALLS" {
+			t.Fatalf("a predeclared conversion is not a call: %+v", e)
+		}
+	}
+	for _, n := range a.Notes {
+		if strings.Contains(n, "unresolved") {
+			t.Fatalf("a conversion must not be counted unresolved: %v", a.Notes)
+		}
+	}
+}
+
+// 树外类型上的方法调用，接收者的类型是已知的（sync.WaitGroup），
+// 未知的只是方法。它该和包级外部调用一样建 stand-in 记边，
+// 而不是记一条说「接收者类型未知」的假账。
+func TestExternalMethodCallsBecomeStandIns(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go":   "package m\n\nimport \"sync\"\n\nfunc Use(wg *sync.WaitGroup) { wg.Add(1) }\n",
+	}})
+	if !hasEdge(a, "m.Use", "CALLS", "sync.WaitGroup.Add") {
+		t.Fatalf("an external method call is a stand-in edge: %v", a.Edges)
+	}
+	for _, n := range a.Nodes {
+		if n.Label == "UnresolvedRef" && strings.Contains(n.Key, "wg.Add") {
+			t.Fatalf("a typed external receiver is not 'receiver type unknown': %v", keys(a))
+		}
+	}
+}
+
+// 反向的那一半：预声明类型不属于任何包。
+func TestPredeclaredReceiversDoNotInventPackageTypes(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go":   "package m\n\nfunc Use(err error) string { return err.Error() }\n",
+	}})
+	for _, n := range a.Nodes {
+		if strings.Contains(n.Key, "m.error") {
+			t.Fatalf("a predeclared type is not this package's: %v", keys(a))
+		}
+	}
+}
+
+// 接收者的类型写在方法签名里，是所有绑定里唯一完全不需要推断的一条。
+func TestReceiverIsTypedByItsSignature(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype walker struct{}\n\n" +
+			"func (w *walker) hint() {}\n\n" +
+			"func (w *walker) hints() { w.hint() }\n",
+	}})
+	if !hasEdge(a, "m.walker.hints", "CALLS", "m.walker.hint") {
+		t.Fatalf("a call on the receiver resolves: %v", a.Edges)
+	}
+}
+
+// 值接收者、以及接收者名字与参数名字不同的情形，走同一条路。
+func TestValueReceiverIsTypedToo(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype Rule struct{}\n\n" +
+			"func (Rule) Check() bool { return true }\n\n" +
+			"func (r Rule) Run() bool { return r.Check() }\n",
+	}})
+	if !hasEdge(a, "m.Rule.Run", "CALLS", "m.Rule.Check") {
+		t.Fatalf("a value receiver is typed by its signature: %v", a.Edges)
+	}
+}
+
+func TestRangeValueTakesTheElementType(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype Rule struct{}\n\n" +
+			"func (Rule) NeedsWholeDocument() bool { return false }\n\n" +
+			"func Build(rules []Rule) {\n" +
+			"\tfor _, r := range rules {\n\t\t_ = r.NeedsWholeDocument()\n\t}\n}\n",
+	}})
+	if !hasEdge(a, "m.Build", "CALLS", "m.Rule.NeedsWholeDocument") {
+		t.Fatalf("a range value takes the slice's element type: %v", a.Edges)
+	}
+}
+
+// 反向对照：容器自己不能拿到元素的方法。
+func TestTheContainerItselfDoesNotTakeElementMethods(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype Rule struct{}\n\n" +
+			"func (Rule) Check() bool { return false }\n\n" +
+			"func Build(rules []Rule) { _ = rules.Check() }\n",
+	}})
+	if hasEdge(a, "m.Build", "CALLS", "m.Rule.Check") {
+		t.Fatalf("a slice does not have its element's methods: %v", a.Edges)
+	}
+}
+
+func TestRangeOverALocalSliceDeclaration(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype Rule struct{}\n\n" +
+			"func (Rule) Check() bool { return false }\n\n" +
+			"func Build() {\n\tvar rules []Rule\n" +
+			"\tfor _, r := range rules {\n\t\t_ = r.Check()\n\t}\n}\n",
+	}})
+	if !hasEdge(a, "m.Build", "CALLS", "m.Rule.Check") {
+		t.Fatalf("a var-declared slice types its range value: %v", a.Edges)
+	}
+}
+
+func TestRangeOverAMapTakesTheValueType(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m",
+		"a.go": "package m\n\ntype Rule struct{}\n\n" +
+			"func (Rule) Check() bool { return false }\n\n" +
+			"func Build(rules map[string]Rule) {\n" +
+			"\tfor _, r := range rules {\n\t\t_ = r.Check()\n\t}\n}\n",
+	}})
+	if !hasEdge(a, "m.Build", "CALLS", "m.Rule.Check") {
+		t.Fatalf("a map's range value takes the value type: %v", a.Edges)
+	}
+}
