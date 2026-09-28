@@ -4373,6 +4373,12 @@ impl Typing<'_> {
     /// [`Self::chain_type`], with the hop that stopped it when it stops:
     /// what the ledger edge says, so a blind spot names its cause.
     fn chain_type_why(&self, caller: &str, chain: &str, depth: usize) -> Result<Ty, String> {
+        // Spends the budget rather than assuming one is left: a closure body
+        // that chains back to its own hop recurses without this, and `depth - 1`
+        // below wraps at zero, which a release build turns into no bound at all.
+        if depth == 0 {
+            return Err(format!("`{chain}` is typed through too many hops"));
+        }
         let module = self.scopes.get(caller).map(String::as_str).unwrap_or("");
         let mut hops = chain.split('.');
         let head = hops.next().ok_or_else(|| "empty receiver".to_string())?;

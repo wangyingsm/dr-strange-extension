@@ -3207,3 +3207,63 @@ fn a_declaration_records_where_it_ends_without_moving_where_it_starts() {
     assert_eq!(at("k::tiny", "line"), Some(15));
     assert_eq!(at("k::tiny", "end_line"), Some(15));
 }
+
+/// A closure body that chains back through its own hop is a cycle, and the
+/// hop budget is what ends it. `chain_type_why` used to spend the budget
+/// without checking one was left, so `depth - 1` wrapped at zero: a debug
+/// build panicked with "attempt to subtract with overflow", and the release
+/// build the wasm component is compiled as recursed until the guest stack was
+/// gone — `plugin `rust` trapped: call stack exhausted`, which left a plane
+/// dropped and never rebuilt.
+#[test]
+fn a_closure_body_that_chains_through_its_own_hop_ends_on_the_budget() {
+    let declared: BTreeSet<String> = ["m::T".to_string()].into_iter().collect();
+    let scopes: BTreeMap<String, String> = [("m::T::f".to_string(), "m".to_string())]
+        .into_iter()
+        .collect();
+    // The cycle: typing `self.map()` asks its closure body for what the hop
+    // yields, and that body is the same chain again.
+    let closure_bodies: BTreeMap<(String, String), String> =
+        [(("m::T::f".to_string(), "self.map()".to_string()), "self.map()".to_string())]
+            .into_iter()
+            .collect();
+    let empty_vecs = BTreeMap::new();
+    let empty_strs = BTreeMap::new();
+    let empty_alias = BTreeMap::new();
+    let empty_consts = BTreeMap::new();
+    let empty_ctypes = BTreeMap::new();
+    let empty_variants = BTreeMap::new();
+    let empty_locals = BTreeMap::new();
+    let empty_fields = BTreeMap::new();
+    let empty_impls = BTreeMap::new();
+    let empty_timpls = BTreeMap::new();
+    let typing = Typing {
+        declared: &declared,
+        fns: &empty_vecs,
+        types: &empty_vecs,
+        traits: &empty_vecs,
+        scopes: &scopes,
+        aliases: &empty_strs,
+        returns_map: &empty_strs,
+        alias_map: &empty_alias,
+        closure_bodies: &closure_bodies,
+        consts_by_name: &empty_consts,
+        const_types: &empty_ctypes,
+        variant_map: &empty_variants,
+        local_inits: &empty_locals,
+        fields_map: &empty_fields,
+        impls_of: &empty_impls,
+        trait_impl_methods: &empty_timpls,
+    };
+
+    // Returns rather than recursing: the assertion is that this call ends at
+    // all. Whether the hop types is beside the point.
+    let _ = typing.chain_type_why("m::T::f", "self.map()", 24);
+
+    // And the budget itself refuses instead of spending what it has not got.
+    let out = typing.chain_type_why("m::T::f", "self.map()", 0);
+    assert!(
+        out.is_err_and(|why| why.contains("too many hops")),
+        "a spent budget names itself as the reason"
+    );
+}
