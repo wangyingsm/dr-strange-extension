@@ -1123,3 +1123,31 @@ fn an_uninjected_port_value_is_not_dispatched() {
     assert!(has_edge(&a, "m.Caller.use", "CALLS", "m.Port.go"));
     assert!(!has_edge(&a, "m.Caller.use", "CALLS", "m.Only.go"));
 }
+
+/// An enhanced-for states its variable's type as plainly as a declaration
+/// does, so a call on the loop variable resolves — and under Spring, reaches
+/// every bean the container filled the collection with.
+#[test]
+fn an_enhanced_for_variable_is_typed_by_its_declaration() {
+    let a = run(vec![
+        (
+            "Handler.java",
+            "package m;\n\npublic interface Handler {\n    void handle();\n}\n",
+        ),
+        (
+            "A.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass A implements Handler {\n    public void handle() {}\n}\n",
+        ),
+        (
+            "B.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass B implements Handler {\n    public void handle() {}\n}\n",
+        ),
+        (
+            "Fanout.java",
+            "package m;\n\nimport java.util.List;\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Fanout {\n    @Autowired\n    private List<Handler> handlers;\n\n    void all() {\n        for (Handler h : handlers) {\n            h.handle();\n        }\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.Handler.handle"));
+    assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.A.handle"));
+    assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.B.handle"));
+}

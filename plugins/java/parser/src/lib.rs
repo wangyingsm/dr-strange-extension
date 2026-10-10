@@ -1110,6 +1110,19 @@ impl Walker<'_> {
                         }
                     }
                 }
+                // `for (Handler h : handlers)` states `h`'s type as plainly as
+                // a local declaration does.
+                "enhanced_for_statement" => {
+                    if let (Some(t), Some(n)) = (
+                        node.child_by_field_name("type"),
+                        node.child_by_field_name("name"),
+                    ) && let Some(written) = self.type_name(t)
+                        && self.text(t) != "var"
+                    {
+                        let vname = self.text(n);
+                        self.hint(caller, vname, written);
+                    }
+                }
                 // A local class's calls still belong to the method a reader
                 // would look at; its declaration is beside the point here.
                 _ => {}
