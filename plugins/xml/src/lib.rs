@@ -12,9 +12,9 @@
 //! name Java methods, and those names are the java plugin's own keys, so the
 //! two halves of a Mapper meet in one graph.
 
-use dr_strange_ext::{
-    Input, Manifest, Output, OutputExt, Simple, host, node, output, simple_plugin,
-};
+mod mybatis;
+
+use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, output, simple_plugin};
 
 /// Shown beside the name in UIs (`manifest.logo`): an original mark evoking a
 /// marked-up document, not any vendor's logo.
@@ -106,7 +106,22 @@ fn dialect(text: &str) -> Dialect {
 fn extract(path: &str, text: &str, out: &mut Output) {
     match dialect(text) {
         Dialect::MybatisMapper => {
-            out.nodes.push(node(path, "Mapper").build());
+            let read = mybatis::read(path, text, out);
+            out.note(format!("{path}: {} statement(s) read", read.statements));
+            if read.foreign_includes > 0 {
+                out.note(format!(
+                    "{path}: {} `<include refid>` named a fragment another file holds — \
+                     a cross-file include is not resolved",
+                    read.foreign_includes
+                ));
+            }
+            if read.interpolations > 0 {
+                out.note(format!(
+                    "{path}: {} `${{…}}` interpolation(s) left as written — what they \
+                     paste may be the table itself, and is not guessed at",
+                    read.interpolations
+                ));
+            }
         }
         Dialect::Unknown => {
             // Prose, exactly as an unclaimed file's text would be. Claiming an
