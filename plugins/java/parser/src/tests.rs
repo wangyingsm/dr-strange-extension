@@ -851,3 +851,275 @@ fn a_collection_injection_point_keeps_its_element() {
     assert_eq!(i.written, "List");
     assert_eq!(i.args, vec!["Handler".to_string()]);
 }
+
+// ---- Spring injection -----------------------------------------------------
+
+/// The Spring shape in full: a controller injects a port, the bean that
+/// implements it is the only one, and the call reaches it — while the call to
+/// the port stays recorded as the source wrote it.
+#[test]
+fn a_call_through_a_port_reaches_the_only_bean() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "OrderServiceImpl.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\npublic class OrderServiceImpl implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "OrderController.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.RestController;\n\n@RestController\npublic class OrderController {\n    @Autowired\n    private OrderService orderService;\n\n    public void create(String id) {\n        orderService.place(id);\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(
+        &a,
+        "m.OrderController.create",
+        "CALLS",
+        "m.OrderService.place"
+    ));
+    let wired = a
+        .edges
+        .iter()
+        .find(|e| {
+            e.ty == "CALLS"
+                && e.src == "m.OrderController.create"
+                && e.dst == "m.OrderServiceImpl.place"
+        })
+        .expect("the call reaches the bean Spring wires");
+    assert_eq!(text(&wired.props["_resolved_by"]), "spring-bean");
+    assert_eq!(text(&wired.props["_confidence"]), "high");
+    assert_eq!(text(&wired.props["_via"]["$value"]), "m.OrderService.place");
+    note_containing(&a, "the bean Spring wires");
+}
+
+/// A constructor-injected port dispatches the same way, and the bean's own
+/// call reaches the next bean down — the chain the issue asks for.
+#[test]
+fn a_constructor_injected_chain_reaches_the_bottom() {
+    let a = run(vec![
+        (
+            "Repo.java",
+            "package m;\n\npublic interface Repo {\n    void save(String id);\n}\n",
+        ),
+        (
+            "JpaRepo.java",
+            "package m;\n\nimport org.spring.Repository;\n\n@Repository\nclass JpaRepo implements Repo {\n    public void save(String id) {}\n}\n",
+        ),
+        (
+            "Svc.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Svc {\n    private final Repo repo;\n\n    Svc(Repo repo) {\n        this.repo = repo;\n    }\n\n    void place(String id) {\n        this.repo.save(id);\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Svc.place", "CALLS", "m.Repo.save"));
+    assert!(has_edge(&a, "m.Svc.place", "CALLS", "m.JpaRepo.save"));
+}
+
+/// Two beans and a `@Qualifier`: the name the injection point states picks the
+/// bean, and the bean's own name is Spring's — the stereotype's argument, else
+/// the simple name decapitalized.
+#[test]
+fn a_qualifier_picks_the_bean_by_name() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "Fast.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service(\"fast\")\nclass Fast implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Slow.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Slow implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "ByName.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Qualifier;\nimport org.spring.Service;\n\n@Service\nclass ByName {\n    @Autowired\n    @Qualifier(\"fast\")\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+        (
+            "BySimpleName.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Qualifier;\nimport org.spring.Service;\n\n@Service\nclass BySimpleName {\n    @Autowired\n    @Qualifier(\"slow\")\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.ByName.use", "CALLS", "m.Fast.go"));
+    assert!(!has_edge(&a, "m.ByName.use", "CALLS", "m.Slow.go"));
+    assert!(has_edge(&a, "m.BySimpleName.use", "CALLS", "m.Slow.go"));
+    assert!(!has_edge(&a, "m.BySimpleName.use", "CALLS", "m.Fast.go"));
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.ty == "CALLS" && e.src == "m.ByName.use" && e.dst == "m.Fast.go")
+        .unwrap();
+    assert_eq!(text(&e.props["_resolved_by"]), "spring-qualifier");
+}
+
+/// `@Primary` breaks a tie the injection point does not.
+#[test]
+fn primary_breaks_a_tie_between_two_beans() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "Chosen.java",
+            "package m;\n\nimport org.spring.Primary;\nimport org.spring.Service;\n\n@Service\n@Primary\nclass Chosen implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Other.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Other implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Host.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Host {\n    @Autowired\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Host.use", "CALLS", "m.Chosen.go"));
+    assert!(!has_edge(&a, "m.Host.use", "CALLS", "m.Other.go"));
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.ty == "CALLS" && e.src == "m.Host.use" && e.dst == "m.Chosen.go")
+        .unwrap();
+    assert_eq!(text(&e.props["_resolved_by"]), "spring-primary");
+}
+
+/// Two beans, nothing to choose between them: the call stays at the port and
+/// the account says why. Spring would not start on this either.
+#[test]
+fn two_beans_and_no_tie_break_resolve_to_nothing() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "One.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass One implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Two.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Two implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Host.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Host {\n    @Autowired\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Host.use", "CALLS", "m.Port.go"));
+    assert!(!has_edge(&a, "m.Host.use", "CALLS", "m.One.go"));
+    assert!(!has_edge(&a, "m.Host.use", "CALLS", "m.Two.go"));
+    note_containing(&a, "stop at their port");
+}
+
+/// A container-full of a port is every bean of it: Spring injects them all, so
+/// a call through a value of that port inside the asking type reaches each, at
+/// a confidence that says which one runs is not written down.
+#[test]
+fn a_collection_injection_point_reaches_every_bean() {
+    let a = run(vec![
+        (
+            "Handler.java",
+            "package m;\n\npublic interface Handler {\n    void handle();\n}\n",
+        ),
+        (
+            "A.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass A implements Handler {\n    public void handle() {}\n}\n",
+        ),
+        (
+            "B.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass B implements Handler {\n    public void handle() {}\n}\n",
+        ),
+        (
+            "Fanout.java",
+            "package m;\n\nimport java.util.List;\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Fanout {\n    @Autowired\n    private List<Handler> handlers;\n\n    void all() {\n        Handler h = handlers.get(0);\n        h.handle();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.A.handle"));
+    assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.B.handle"));
+    let e = a
+        .edges
+        .iter()
+        .find(|e| e.ty == "CALLS" && e.src == "m.Fanout.all" && e.dst == "m.A.handle")
+        .unwrap();
+    assert_eq!(text(&e.props["_resolved_by"]), "spring-bean-collection");
+    assert_eq!(text(&e.props["_confidence"]), "medium");
+}
+
+/// A port Spring generates the implementation for — a Spring Data repository —
+/// has no bean in the tree, so the chain honestly ends at the port.
+#[test]
+fn a_port_with_no_bean_stops_at_the_port() {
+    let a = run(vec![
+        (
+            "OrderRepo.java",
+            "package m;\n\nimport org.data.JpaRepository;\n\npublic interface OrderRepo extends JpaRepository<String, Long> {\n    void save(String id);\n}\n",
+        ),
+        (
+            "Svc.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Svc {\n    @Autowired\n    private OrderRepo repo;\n\n    void go() {\n        repo.save(\"x\");\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Svc.go", "CALLS", "m.OrderRepo.save"));
+    assert_eq!(
+        a.edges
+            .iter()
+            .filter(|e| e.ty == "CALLS" && e.src == "m.Svc.go")
+            .count(),
+        1,
+        "nothing is invented for a port the tree holds no bean for"
+    );
+}
+
+/// A `@Bean` method in a `@Configuration` registers what it returns, and an
+/// abstract class between port and bean is walked to where the code is.
+#[test]
+fn a_bean_method_registers_what_it_returns() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "Base.java",
+            "package m;\n\nabstract class Base implements Port {\n    public void go() {}\n}\n",
+        ),
+        ("Impl.java", "package m;\n\nclass Impl extends Base {\n}\n"),
+        (
+            "Config.java",
+            "package m;\n\nimport org.spring.Bean;\nimport org.spring.Configuration;\n\n@Configuration\nclass Config {\n    @Bean\n    Impl impl() {\n        return new Impl();\n    }\n}\n",
+        ),
+        (
+            "Host.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Host {\n    @Autowired\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+    ]);
+    // The method is declared on the abstract base, which is where a reader
+    // goes — not on the bean that inherits it.
+    assert!(has_edge(&a, "m.Host.use", "CALLS", "m.Base.go"));
+    assert!(has_edge(&a, "m.Host.use", "CALLS", "m.Port.go"));
+}
+
+/// A port value that nothing injects is not dispatched: whoever built it chose
+/// the implementation, and that is data flow a parser must not guess at.
+#[test]
+fn an_uninjected_port_value_is_not_dispatched() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "Only.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Only implements Port {\n    public void go() {}\n}\n",
+        ),
+        (
+            "Caller.java",
+            "package m;\n\nclass Caller {\n    void use(Port port) {\n        port.go();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Caller.use", "CALLS", "m.Port.go"));
+    assert!(!has_edge(&a, "m.Caller.use", "CALLS", "m.Only.go"));
+}

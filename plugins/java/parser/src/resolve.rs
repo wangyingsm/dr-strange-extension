@@ -4,7 +4,7 @@
 //! every clause turned into its edge. Once, over every chunk's facts, in
 //! chunk order.
 
-use crate::{CallKind, Edge, FileFacts, Injection, Node, Props, edge_at};
+use crate::{CallKind, Edge, FileFacts, Injection, Node, Props, STEREOTYPES, edge_at};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -100,6 +100,56 @@ struct TypeEntry {
     extends: Vec<String>,
     /// A class's interfaces.
     implements: Vec<String>,
+    /// Its label, so a port (`Interface`) is told from a type that writes its
+    /// own methods.
+    kind: String,
+}
+
+/// A bean Spring would instantiate: the name it is registered under, and
+/// whether it wins a tie.
+struct Bean {
+    name: String,
+    primary: bool,
+}
+
+/// The containers Spring fills with every bean of the element type.
+const MULTIVALUED: &[&str] = &["List", "Set", "Collection", "Iterable", "Map", "Stream"];
+
+/// The last segment of a qualified name — an annotation is matched by the name
+/// Spring knows it by, however the source spelled the import.
+fn simple(qualified: &str) -> &str {
+    qualified.rsplit('.').next().unwrap_or(qualified)
+}
+
+/// Spring's default bean name: the simple name decapitalized, except that two
+/// leading capitals stay as written (`URLFetcher`), as `Introspector` does.
+fn decapitalize(simple: &str) -> String {
+    let mut cs = simple.chars();
+    match (cs.next(), cs.next()) {
+        (Some(a), Some(b)) if a.is_uppercase() && b.is_uppercase() => simple.to_string(),
+        (Some(a), _) => a.to_lowercase().chain(simple.chars().skip(1)).collect(),
+        _ => simple.to_string(),
+    }
+}
+
+/// The bean name an annotation's arguments state: a lone string literal, or a
+/// `name = "…"` / `value = "…"` member. Nothing when they say something else.
+fn named_arg(args: &str) -> Option<String> {
+    let literal = |s: &str| -> Option<String> {
+        let t = s.trim();
+        t.strip_prefix('"')
+            .and_then(|t| t.strip_suffix('"'))
+            .map(str::to_string)
+    };
+    if let Some(one) = literal(args) {
+        return Some(one);
+    }
+    args.split(',').find_map(|part| {
+        let (key, value) = part.split_once('=')?;
+        matches!(key.trim(), "name" | "value")
+            .then(|| literal(value))
+            .flatten()
+    })
 }
 
 struct Index {
@@ -186,6 +236,166 @@ impl Index {
         }
         None
     }
+
+    /// Every in-tree type above `type_key` — superclasses and interfaces, all
+    /// the way up. A port names its implementations through this, reversed.
+    fn ancestors(&self, f: &FileFacts, type_key: &str, depth: usize, out: &mut BTreeSet<String>) {
+        if depth > 16 {
+            return;
+        }
+        let Some(entry) = self.types.get(type_key) else {
+            return;
+        };
+        for base in entry.extends.iter().chain(&entry.implements) {
+            if let Ok((base_key, true)) = self.type_ref(base, f)
+                && out.insert(base_key.clone())
+            {
+                self.ancestors(f, &base_key, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// One call site asking for a port's implementation.
+struct Site<'a> {
+    /// The interface the receiver is typed by, whose implementations are the
+    /// candidates.
+    port: &'a str,
+    method: &'a str,
+    /// The port method the source named — where the written edge went.
+    via: &'a str,
+    /// The type holding the receiver, whose injection points say how the
+    /// dependency arrives.
+    owner: &'a str,
+    injection: Option<&'a Injection>,
+}
+
+/// What the container's rules conclude at one call site.
+enum Picked {
+    /// Not a port, or not an injected receiver: nothing to say.
+    Silent,
+    /// The bean, or the container-full of beans, that Spring wires.
+    Wired(Vec<Wired>),
+    /// Several beans implement the port and nothing says which — the case
+    /// Spring itself refuses to start on.
+    Ambiguous,
+}
+
+/// One edge the container implies: the bean's method, the rule that picked it,
+/// and the port method the source actually named.
+struct Wired {
+    dst: String,
+    by: &'static str,
+    confidence: &'static str,
+    via: String,
+}
+
+/// What Spring's rules need to pick a bean at one call site.
+struct Dispatch<'a> {
+    ix: &'a Index,
+    beans: &'a BTreeMap<String, Bean>,
+    implementors: &'a BTreeMap<String, BTreeSet<String>>,
+    collections: &'a BTreeSet<(String, String)>,
+}
+
+impl Dispatch<'_> {
+    /// Which bean's method a call through a port reaches — Spring's own rules,
+    /// in its own order, and nothing where the container itself would refuse
+    /// to start.
+    ///
+    /// Only an injected receiver is dispatched: when a port value arrives any
+    /// other way, whoever built it chose the implementation, and that is data
+    /// flow a parser must not guess at. A type that asks for a container-full
+    /// of the port has declared it takes every bean of it, which counts for
+    /// any value of that port inside it.
+    fn pick(&self, at: &Site<'_>, f: &FileFacts) -> Picked {
+        let by_the_container = self
+            .collections
+            .contains(&(at.owner.to_string(), at.port.to_string()));
+        if at.injection.is_none() && !by_the_container {
+            return Picked::Silent;
+        }
+        if self.ix.types.get(at.port).map(|e| e.kind.as_str()) != Some("Interface") {
+            return Picked::Silent;
+        }
+        // A candidate is a bean that answers the method; the type that
+        // declares it is where the code is, which may be a base class.
+        let candidates: Vec<(&String, &Bean, String)> = self
+            .implementors
+            .get(at.port)
+            .into_iter()
+            .flatten()
+            .filter_map(|key| {
+                let bean = self.beans.get(key)?;
+                let owner = self.ix.find_method(f, key, at.method, 0)?;
+                Some((key, bean, format!("{owner}.{}", at.method)))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Picked::Silent;
+        }
+        let one = |dst: String, by: &'static str, confidence: &'static str| -> Picked {
+            Picked::Wired(vec![Wired {
+                dst,
+                by,
+                confidence,
+                via: at.via.to_string(),
+            }])
+        };
+
+        if let Some(name) = at
+            .injection
+            .and_then(|i| i.qualifier.as_deref())
+            .and_then(named_arg)
+            && let Some((_, _, dst)) = candidates.iter().find(|(_, b, _)| b.name == name)
+        {
+            return one(dst.clone(), "spring-qualifier", "high");
+        }
+        if let [(_, _, dst)] = candidates.as_slice() {
+            return one(dst.clone(), "spring-bean", "high");
+        }
+        if let [(_, _, dst)] = candidates
+            .iter()
+            .filter(|(_, b, _)| b.primary)
+            .collect::<Vec<_>>()
+            .as_slice()
+        {
+            return one(dst.to_string(), "spring-primary", "high");
+        }
+        // A container-full of the port: Spring injects every bean of it, and
+        // which one runs at a given moment is not written anywhere.
+        if by_the_container {
+            return Picked::Wired(
+                candidates
+                    .iter()
+                    .map(|(_, _, dst)| Wired {
+                        dst: dst.clone(),
+                        by: "spring-bean-collection",
+                        confidence: "medium",
+                        via: at.via.to_string(),
+                    })
+                    .collect(),
+            );
+        }
+        Picked::Ambiguous
+    }
+}
+
+/// A dispatch edge, carrying the rule that picked the bean.
+fn wired_edge(src: &str, line: u64, w: &Wired) -> Edge {
+    let mut e = edge_at(src, &w.dst, "CALLS", line);
+    e.props
+        .insert("_resolved_by".into(), Value::String(w.by.into()));
+    e.props
+        .insert("_confidence".into(), Value::String(w.confidence.into()));
+    e.props.insert(
+        "_via".into(),
+        serde_json::json!({
+            "$desc": "the port method the source named, which the container wires to this",
+            "$value": w.via.clone(),
+        }),
+    );
+    e
 }
 
 fn note_external(
@@ -233,6 +443,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 methods: t.methods.iter().cloned().collect(),
                 extends: t.extends.clone(),
                 implements: t.implements.clone(),
+                kind: t.kind.clone(),
             });
             if let Some(simple) = t.key.rsplit('.').next()
                 && t.key
@@ -358,13 +569,101 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     // how a receiver reaches one: `repo.save()` in a bean asks what wired
     // `repo`.
     let mut inject_ix: BTreeMap<(String, String), &Injection> = BTreeMap::new();
+    // The ports an owner asks for by the container-full: Spring hands these
+    // every bean of the element type, so a call through one reaches them all.
+    let mut collections: BTreeSet<(String, String)> = BTreeSet::new();
     for f in &all {
         for i in &f.injections {
             inject_ix
                 .entry((i.owner.clone(), i.name.clone()))
                 .or_insert(i);
+            if !MULTIVALUED.contains(&simple(&i.written)) {
+                continue;
+            }
+            for arg in &i.args {
+                if let Ok((key, true)) = ix.type_ref(arg, f) {
+                    collections.insert((i.owner.clone(), key));
+                }
+            }
         }
     }
+
+    // ---- the bean index ---------------------------------------------------
+    // A stereotype makes a type a bean; a `@Bean` method makes one of what it
+    // returns. The name is what a `@Qualifier` matches against.
+    let mut beans: BTreeMap<String, Bean> = BTreeMap::new();
+    for f in &all {
+        for c in &f.clauses {
+            if c.ty != "ANNOTATED_BY" {
+                continue;
+            }
+            let anno = simple(&c.written);
+            if STEREOTYPES.contains(&anno) {
+                if !ix.types.contains_key(&c.src) {
+                    continue;
+                }
+                let name = c
+                    .args
+                    .as_deref()
+                    .and_then(named_arg)
+                    .unwrap_or_else(|| decapitalize(simple(&c.src)));
+                beans.entry(c.src.clone()).or_insert(Bean {
+                    name,
+                    primary: false,
+                });
+            } else if anno == "Bean" {
+                let Some(returned) = returns_ix.get(&c.src) else {
+                    continue;
+                };
+                let name = c
+                    .args
+                    .as_deref()
+                    .and_then(named_arg)
+                    .unwrap_or_else(|| simple(&c.src).to_string());
+                beans.entry(returned.clone()).or_insert(Bean {
+                    name,
+                    primary: false,
+                });
+            }
+        }
+    }
+    // `@Primary` is read after the beans exist: it ranks one, it does not
+    // declare it.
+    for f in &all {
+        for c in &f.clauses {
+            if c.ty == "ANNOTATED_BY" && simple(&c.written) == "Primary" {
+                if let Some(b) = beans.get_mut(&c.src) {
+                    b.primary = true;
+                }
+                if let Some(returned) = returns_ix.get(&c.src)
+                    && let Some(b) = beans.get_mut(returned)
+                {
+                    b.primary = true;
+                }
+            }
+        }
+    }
+
+    // Every in-tree type under each port it answers to, transitively, so
+    // `FooImpl extends AbstractFoo implements Foo` is one of `Foo`'s.
+    let mut implementors: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for f in &all {
+        for t in &f.types {
+            let mut ports: BTreeSet<String> = BTreeSet::new();
+            ix.ancestors(f, &t.key, 0, &mut ports);
+            for port in ports {
+                implementors.entry(port).or_default().insert(t.key.clone());
+            }
+        }
+    }
+    let dispatch = Dispatch {
+        ix: &ix,
+        beans: &beans,
+        implementors: &implementors,
+        collections: &collections,
+    };
+    let mut wired_calls = 0usize;
+    let mut ambiguous_ports = 0usize;
 
     let stamped = |src: &str, dst: &str, line: u64, strategy: &str, written: &str| -> Edge {
         let mut e = edge_at(src, dst, "CALLS", line);
@@ -467,58 +766,146 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     Err(()) => unresolved += 1,
                 },
                 CallKind::Receiver { name, method } => {
-                    let hit = type_of(&c.caller, &c.in_type, name)
-                        .and_then(|class| ix.find_method(f, class, method, 0));
+                    let hit = type_of(&c.caller, &c.in_type, name).and_then(|class| {
+                        ix.find_method(f, class, method, 0)
+                            .map(|o| (class.clone(), o))
+                    });
                     match hit {
-                        Some(owner) => add_edge(
-                            &mut pending,
-                            &mut edge_set,
-                            stamped(
-                                &c.caller,
-                                &format!("{owner}.{method}"),
-                                c.line,
-                                "receiver",
-                                &format!("{name}.{method}"),
-                            ),
-                        ),
+                        Some((declared, owner)) => {
+                            let via = format!("{owner}.{method}");
+                            add_edge(
+                                &mut pending,
+                                &mut edge_set,
+                                stamped(
+                                    &c.caller,
+                                    &via,
+                                    c.line,
+                                    "receiver",
+                                    &format!("{name}.{method}"),
+                                ),
+                            );
+                            let site = Site {
+                                port: &declared,
+                                method,
+                                via: &via,
+                                owner: &c.in_type,
+                                injection: inject_ix
+                                    .get(&(c.in_type.clone(), name.clone()))
+                                    .copied(),
+                            };
+                            match dispatch.pick(&site, f) {
+                                Picked::Wired(ws) => {
+                                    for w in &ws {
+                                        add_edge(
+                                            &mut pending,
+                                            &mut edge_set,
+                                            wired_edge(&c.caller, c.line, w),
+                                        );
+                                        wired_calls += 1;
+                                    }
+                                }
+                                Picked::Ambiguous => ambiguous_ports += 1,
+                                Picked::Silent => {}
+                            }
+                        }
                         None => unresolved += 1,
                     }
                 }
                 CallKind::SelfField { field, method } => {
                     let hit = hint_ix
                         .get(&(c.in_type.clone(), field.clone()))
-                        .and_then(|class| ix.find_method(f, class, method, 0));
+                        .and_then(|class| {
+                            ix.find_method(f, class, method, 0)
+                                .map(|o| (class.clone(), o))
+                        });
                     match hit {
-                        Some(owner) => add_edge(
-                            &mut pending,
-                            &mut edge_set,
-                            stamped(
-                                &c.caller,
-                                &format!("{owner}.{method}"),
-                                c.line,
-                                "self-attr",
-                                &format!("this.{field}.{method}"),
-                            ),
-                        ),
+                        Some((declared, owner)) => {
+                            let via = format!("{owner}.{method}");
+                            add_edge(
+                                &mut pending,
+                                &mut edge_set,
+                                stamped(
+                                    &c.caller,
+                                    &via,
+                                    c.line,
+                                    "self-attr",
+                                    &format!("this.{field}.{method}"),
+                                ),
+                            );
+                            let site = Site {
+                                port: &declared,
+                                method,
+                                via: &via,
+                                owner: &c.in_type,
+                                injection: inject_ix
+                                    .get(&(c.in_type.clone(), field.clone()))
+                                    .copied(),
+                            };
+                            match dispatch.pick(&site, f) {
+                                Picked::Wired(ws) => {
+                                    for w in &ws {
+                                        add_edge(
+                                            &mut pending,
+                                            &mut edge_set,
+                                            wired_edge(&c.caller, c.line, w),
+                                        );
+                                        wired_calls += 1;
+                                    }
+                                }
+                                Picked::Ambiguous => ambiguous_ports += 1,
+                                Picked::Silent => {}
+                            }
+                        }
                         None => unresolved += 1,
                     }
                 }
                 CallKind::FieldChain { obj, field, method } => {
                     let hit = type_of(&c.caller, &c.in_type, obj)
-                        .and_then(|c1| hint_ix.get(&(c1.clone(), field.clone())))
-                        .and_then(|c2| ix.find_method(f, c2, method, 0));
+                        .and_then(|c1| {
+                            hint_ix
+                                .get(&(c1.clone(), field.clone()))
+                                .map(|c2| (c1.clone(), c2.clone()))
+                        })
+                        .and_then(|(holder, declared)| {
+                            ix.find_method(f, &declared, method, 0)
+                                .map(|o| (holder, declared, o))
+                        });
                     match hit {
-                        Some(owner) => add_edge(
-                            &mut pending,
-                            &mut edge_set,
-                            stamped(
-                                &c.caller,
-                                &format!("{owner}.{method}"),
-                                c.line,
-                                "receiver",
-                                &format!("{obj}.{field}.{method}"),
-                            ),
-                        ),
+                        Some((holder, declared, owner)) => {
+                            let via = format!("{owner}.{method}");
+                            add_edge(
+                                &mut pending,
+                                &mut edge_set,
+                                stamped(
+                                    &c.caller,
+                                    &via,
+                                    c.line,
+                                    "receiver",
+                                    &format!("{obj}.{field}.{method}"),
+                                ),
+                            );
+                            let site = Site {
+                                port: &declared,
+                                method,
+                                via: &via,
+                                owner: &holder,
+                                injection: inject_ix.get(&(holder.clone(), field.clone())).copied(),
+                            };
+                            match dispatch.pick(&site, f) {
+                                Picked::Wired(ws) => {
+                                    for w in &ws {
+                                        add_edge(
+                                            &mut pending,
+                                            &mut edge_set,
+                                            wired_edge(&c.caller, c.line, w),
+                                        );
+                                        wired_calls += 1;
+                                    }
+                                }
+                                Picked::Ambiguous => ambiguous_ports += 1,
+                                Picked::Silent => {}
+                            }
+                        }
                         None => unresolved += 1,
                     }
                 }
@@ -724,6 +1111,20 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         out.notes.push(format!(
             "{injected_edges} of those are injection points — a dependency a \
              container wires, marked `injected` with what the evidence was"
+        ));
+    }
+    if wired_calls > 0 {
+        out.notes.push(format!(
+            "{wired_calls} call(s) through an injected port also reach the bean \
+             Spring wires, stamped with the rule that picked it; the call to the \
+             port stays beside it, as the source wrote it"
+        ));
+    }
+    if ambiguous_ports > 0 {
+        out.notes.push(format!(
+            "{ambiguous_ports} call(s) stop at their port: several beans \
+             implement it and no `@Primary` or `@Qualifier` says which — what \
+             Spring itself refuses to start on"
         ));
     }
     out

@@ -218,6 +218,10 @@ pub struct TypeDecl {
     /// `super.m()` walk, which Java sends to the superclass alone.
     #[serde(default)]
     pub implements: Vec<String>,
+    /// Its label — `Interface` is the one a call can be dispatched through,
+    /// since it declares a method without writing one.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// Everything one file contributes — the opaque partial the component
@@ -526,6 +530,7 @@ impl Walker<'_> {
             methods: Vec::new(),
             extends: Vec::new(),
             implements: Vec::new(),
+            kind: label.to_string(),
         };
 
         // extends / implements are syntax. A generic base extends what it
