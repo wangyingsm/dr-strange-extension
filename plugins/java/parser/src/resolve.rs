@@ -535,18 +535,28 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
 
-        for (src, written, ty, line) in &f.clauses {
-            match ix.type_ref(written, f) {
+        for c in &f.clauses {
+            match ix.type_ref(&c.written, f) {
                 Ok((key, in_tree)) => {
                     if !in_tree {
-                        let label = match ty.as_str() {
+                        let label = match c.ty.as_str() {
                             "IMPLEMENTS" => "Interface",
                             "ANNOTATED_BY" => "Annotation",
                             _ => "Class",
                         };
                         note_external(&seen, &mut external, &key, label);
                     }
-                    add_edge(&mut pending, &mut edge_set, edge_at(src, &key, ty, *line));
+                    let mut e = edge_at(&c.src, &key, &c.ty, c.line);
+                    if let Some(args) = &c.args {
+                        e.props.insert(
+                            "args".into(),
+                            serde_json::json!({
+                                "$desc": "the annotation's arguments, as the source writes them",
+                                "$value": args,
+                            }),
+                        );
+                    }
+                    add_edge(&mut pending, &mut edge_set, e);
                 }
                 Err(()) => unresolved += 1,
             }

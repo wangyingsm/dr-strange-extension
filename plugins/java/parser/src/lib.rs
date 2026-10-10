@@ -123,6 +123,32 @@ pub struct TypeRef {
     pub written: String,
 }
 
+/// One name a declaration writes beside itself — a base, an interface, an
+/// annotation — resolved in [`assemble`] into the edge its kind names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Clause {
+    pub src: String,
+    pub written: String,
+    pub ty: String,
+    pub line: u64,
+    /// An annotation's argument list as written, parentheses stripped.
+    #[serde(default)]
+    pub args: Option<String>,
+}
+
+impl Clause {
+    /// A clause with no arguments — every kind but an annotation's.
+    pub fn new(src: &str, written: String, ty: &str, line: u64) -> Self {
+        Self {
+            src: src.to_string(),
+            written,
+            ty: ty.to_string(),
+            line,
+            args: None,
+        }
+    }
+}
+
 /// A declared type: name, kind, and its method surface (for cross-file
 /// static and inherited resolution).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,9 +184,8 @@ pub struct FileFacts {
     /// Top-level type keys in this file (IMPORTS edges hang off them).
     pub top_types: Vec<String>,
     pub types: Vec<TypeDecl>,
-    /// `(src key, name as written, edge type, line)` — extends, implements,
-    /// and annotations, all resolved the same way.
-    pub clauses: Vec<(String, String, String, u64)>,
+    /// Extends, implements and annotations, all resolved the same way.
+    pub clauses: Vec<Clause>,
     /// The package docstring, from `package-info.java`.
     pub package_doc: Option<String>,
     pub opaque: usize,
@@ -263,8 +288,8 @@ fn parse_file(path: &str, text: &str, include_source: bool) -> FileFacts {
     let marked: Vec<String> = facts
         .clauses
         .iter()
-        .filter(|(_, written, ty, _)| ty == "ANNOTATED_BY" && is_test_annotation(written))
-        .map(|(key, _, _, _)| key.clone())
+        .filter(|c| c.ty == "ANNOTATED_BY" && is_test_annotation(&c.written))
+        .map(|c| c.src.clone())
         .collect();
     for key in marked {
         let owner = key.rsplit_once('.').map(|(o, _)| o.to_string());
@@ -452,7 +477,7 @@ impl Walker<'_> {
                     decl.extends.push(written.clone());
                     self.facts
                         .clauses
-                        .push((key.clone(), written, "EXTENDS".into(), line));
+                        .push(Clause::new(&key, written, "EXTENDS", line));
                 }
             }
         }
@@ -470,7 +495,7 @@ impl Walker<'_> {
                             };
                             self.facts
                                 .clauses
-                                .push((key.clone(), written, ty.into(), line));
+                                .push(Clause::new(&key, written, ty, line));
                         }
                     }
                 }
@@ -753,14 +778,25 @@ impl Walker<'_> {
                 if NOISE.contains(&written.as_str()) {
                     continue;
                 }
-                self.facts.clauses.push((
-                    target_key.to_string(),
-                    written,
-                    "ANNOTATED_BY".into(),
-                    self.line(m),
-                ));
+                let mut clause = Clause::new(target_key, written, "ANNOTATED_BY", self.line(m));
+                clause.args = self.annotation_args(m);
+                self.facts.clauses.push(clause);
             }
         }
+    }
+
+    /// An annotation's arguments as written, parentheses stripped — what
+    /// `@Qualifier("fast")` or `@PostMapping("/orders")` says beyond its name.
+    /// Verbatim: an argument's meaning is the framework's, not a parser's.
+    fn annotation_args(&self, node: TsNode) -> Option<String> {
+        let args = node.child_by_field_name("arguments")?;
+        let text = self.text(args);
+        let inner = text
+            .strip_prefix('(')
+            .and_then(|t| t.strip_suffix(')'))
+            .unwrap_or(&text)
+            .trim();
+        (!inner.is_empty()).then(|| inner.to_string())
     }
 
     /// Records every call a body makes.

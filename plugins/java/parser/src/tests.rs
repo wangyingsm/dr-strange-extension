@@ -387,6 +387,26 @@ fn annotations_are_recorded_but_not_the_noise() {
     assert!(!a.edges.iter().any(|e| e.dst.contains("Override")));
 }
 
+/// An annotation's arguments ride its edge as written — on a Spring codebase
+/// the argument is the fact (`@Qualifier("fast")`, a route), and what it means
+/// is the framework's business, not a parser's.
+#[test]
+fn an_annotation_keeps_its_arguments_as_written() {
+    let a = run(vec![(
+        "Api.java",
+        "package web;\n\nimport org.spring.PostMapping;\nimport org.spring.RestController;\n\n@RestController\nclass Api {\n    @PostMapping(\"/orders\")\n    void create() {}\n}\n",
+    )]);
+    assert_eq!(
+        text(&edge(&a, "ANNOTATED_BY", "org.spring.PostMapping").props["args"]["$value"]),
+        "\"/orders\""
+    );
+    assert!(
+        !edge(&a, "ANNOTATED_BY", "org.spring.RestController")
+            .props
+            .contains_key("args")
+    );
+}
+
 // ---- provenance and robustness --------------------------------------------
 
 /// Every definition knows its file and line, and every written relation
