@@ -149,6 +149,62 @@ impl Clause {
     }
 }
 
+/// One dependency a bean takes by injection, as the source declares it — the
+/// fact Spring's container acts on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Injection {
+    /// The type holding the injection point.
+    pub owner: String,
+    /// The field, or the constructor/setter parameter standing in for it.
+    pub name: String,
+    /// The declared type's head as written.
+    pub written: String,
+    /// Its generic arguments as written — the element a collection injects.
+    pub args: Vec<String>,
+    /// What the evidence was: `annotation` (`@Autowired` / `@Inject` /
+    /// `@Resource` written on it) outranks `constructor` (a stereotyped bean's
+    /// only constructor, which Spring injects unannotated).
+    pub kind: String,
+    /// `@Qualifier`'s or `@Resource`'s arguments as written; which bean name
+    /// they state is read in [`assemble`], with the rest of Spring's rules.
+    pub qualifier: Option<String>,
+}
+
+/// The type a member walk sits in.
+struct TypeCtx<'a> {
+    key: &'a str,
+    /// Its simple name, which a constructor repeats.
+    name: &'a str,
+    /// Its tree-sitter kind — an interface demands its methods where a class
+    /// contains them.
+    kind: &'a str,
+    /// Spring injects this type's only constructor: it is a stereotyped bean
+    /// and declares exactly one.
+    inject_ctor: bool,
+}
+
+/// The annotations Spring reads as "inject this".
+pub const INJECT_ANNOTATIONS: &[&str] = &["Autowired", "Inject", "Resource"];
+
+/// The annotations that make a type a bean Spring would instantiate.
+pub const STEREOTYPES: &[&str] = &[
+    "Service",
+    "Component",
+    "Repository",
+    "Controller",
+    "RestController",
+    "Configuration",
+    "ControllerAdvice",
+    "RestControllerAdvice",
+];
+
+/// An annotation as written on a declaration.
+struct Anno {
+    written: String,
+    args: Option<String>,
+    line: u64,
+}
+
 /// A declared type: name, kind, and its method surface (for cross-file
 /// static and inherited resolution).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,6 +253,9 @@ pub struct FileFacts {
     /// `(method key, declared return as written)` when it names a plain
     /// type — what types a static-factory chain.
     pub returns: Vec<(String, String)>,
+    /// The dependencies this file's types take by injection.
+    #[serde(default)]
+    pub injections: Vec<Injection>,
 }
 
 /// The extensions this plugin claims.
@@ -523,6 +582,20 @@ impl Walker<'_> {
 
         let mut variants: Vec<String> = Vec::new();
         if let Some(body) = node.child_by_field_name("body") {
+            let ctors = body
+                .named_children(&mut body.walk())
+                .filter(|m| m.kind() == "constructor_declaration")
+                .count();
+            let stereotyped = self
+                .annos(node)
+                .iter()
+                .any(|a| STEREOTYPES.contains(&a.written.as_str()));
+            let ctx = TypeCtx {
+                key: &key,
+                name: &name,
+                kind: node.kind(),
+                inject_ctor: stereotyped && ctors == 1,
+            };
             for member in body.named_children(&mut body.walk()) {
                 match member.kind() {
                     "field_declaration" | "constant_declaration" => {
@@ -533,6 +606,8 @@ impl Walker<'_> {
                         let typed = member
                             .child_by_field_name("type")
                             .and_then(|t| self.type_name(t));
+                        let on = self.annos(member);
+                        let injected = Self::is_injected(&on);
                         for d in member.named_children(&mut member.walk()) {
                             if d.kind() == "variable_declarator"
                                 && let Some(n) = d.child_by_field_name("name")
@@ -543,16 +618,16 @@ impl Walker<'_> {
                                 }
                                 if let Some(tnode) = member.child_by_field_name("type") {
                                     self.type_refs(&key, "field", &fname, tnode);
+                                    if injected {
+                                        self.injection(&key, &fname, tnode, "annotation", &on);
+                                    }
                                 }
                                 fields.push(format!("{fname}: {ty}"));
                             }
                         }
                     }
-                    "method_declaration" => {
-                        self.method(member, &key, &name, node.kind(), &mut decl);
-                    }
-                    "constructor_declaration" => {
-                        self.method(member, &key, &name, node.kind(), &mut decl);
+                    "method_declaration" | "constructor_declaration" => {
+                        self.method(member, &ctx, &mut decl);
                     }
                     "enum_constant" => {
                         if let Some(n) = member.child_by_field_name("name") {
@@ -563,7 +638,7 @@ impl Walker<'_> {
                         for m in member.named_children(&mut member.walk()) {
                             match m.kind() {
                                 "method_declaration" | "constructor_declaration" => {
-                                    self.method(m, &key, &name, node.kind(), &mut decl)
+                                    self.method(m, &ctx, &mut decl)
                                 }
                                 "field_declaration" => {
                                     let ty = m
@@ -657,19 +732,12 @@ impl Walker<'_> {
         }
     }
 
-    fn method(
-        &mut self,
-        node: TsNode,
-        type_key: &str,
-        type_name: &str,
-        type_kind: &str,
-        decl: &mut TypeDecl,
-    ) {
+    fn method(&mut self, node: TsNode, ctx: &TypeCtx<'_>, decl: &mut TypeDecl) {
         let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
         let name = self.text(name_node);
-        let key = format!("{type_key}.{name}");
+        let key = format!("{}.{name}", ctx.key);
         let line = self.line(name_node);
 
         let params = node
@@ -708,14 +776,14 @@ impl Walker<'_> {
             });
             // An interface demands its methods (HAS_METHOD, the family's
             // trait convention); a class contains its own.
-            let ty = if type_kind == "interface_declaration"
-                || type_kind == "annotation_type_declaration"
+            let ty = if ctx.kind == "interface_declaration"
+                || ctx.kind == "annotation_type_declaration"
             {
                 "HAS_METHOD"
             } else {
                 "CONTAINS"
             };
-            self.facts.edges.push(edge_at(type_key, &key, ty, line));
+            self.facts.edges.push(edge_at(ctx.key, &key, ty, line));
             decl.methods.push(name.clone());
         }
         self.annotations(node, &key);
@@ -727,6 +795,15 @@ impl Walker<'_> {
         {
             self.facts.returns.push((key.clone(), written));
         }
+        // A constructor's or a setter's parameter stands for the field it is
+        // assigned to, under the name the two conventionally share.
+        let on = self.annos(node);
+        let written_here = Self::is_injected(&on);
+        let injects = if node.kind() == "constructor_declaration" {
+            written_here || ctx.inject_ctor
+        } else {
+            written_here && name.starts_with("set")
+        };
         if let Some(params) = node.child_by_field_name("parameters") {
             for pnode in params.named_children(&mut params.walk()) {
                 if matches!(pnode.kind(), "formal_parameter" | "spread_parameter")
@@ -740,6 +817,15 @@ impl Walker<'_> {
                         self.hint(&key, pname.clone(), written);
                     }
                     self.type_refs(&key, "param", &pname, t);
+                    if injects {
+                        let here = self.annos(pnode);
+                        let kind = if written_here || Self::is_injected(&here) {
+                            "annotation"
+                        } else {
+                            "constructor"
+                        };
+                        self.injection(ctx.key, &pname, t, kind, &here);
+                    }
                 }
             }
         }
@@ -748,7 +834,7 @@ impl Walker<'_> {
         }
 
         if let Some(body) = node.child_by_field_name("body") {
-            self.collect_calls(&key, type_key, type_name, body);
+            self.collect_calls(&key, ctx.key, ctx.name, body);
         }
     }
 
@@ -763,40 +849,92 @@ impl Walker<'_> {
             "FunctionalInterface",
             "SafeVarargs",
         ];
+        for a in self.annos(node) {
+            if NOISE.contains(&a.written.as_str()) {
+                continue;
+            }
+            let mut clause = Clause::new(target_key, a.written, "ANNOTATED_BY", a.line);
+            clause.args = a.args;
+            self.facts.clauses.push(clause);
+        }
+    }
+
+    /// The annotations written on a declaration, with their arguments as
+    /// written, parentheses stripped. Verbatim: an argument's meaning is the
+    /// framework's, not a parser's. A field and a parameter carry no node of
+    /// their own, so this is the only way to reach theirs.
+    fn annos(&self, node: TsNode) -> Vec<Anno> {
         let Some(modifiers) = node
             .named_children(&mut node.walk())
             .find(|c| c.kind() == "modifiers")
         else {
-            return;
+            return Vec::new();
         };
+        let mut out = Vec::new();
         for m in modifiers.named_children(&mut modifiers.walk()) {
-            if m.kind() == "marker_annotation" || m.kind() == "annotation" {
-                let Some(name) = m.child_by_field_name("name") else {
-                    continue;
-                };
-                let written = self.text(name);
-                if NOISE.contains(&written.as_str()) {
-                    continue;
-                }
-                let mut clause = Clause::new(target_key, written, "ANNOTATED_BY", self.line(m));
-                clause.args = self.annotation_args(m);
-                self.facts.clauses.push(clause);
+            if m.kind() != "marker_annotation" && m.kind() != "annotation" {
+                continue;
             }
+            let Some(name) = m.child_by_field_name("name") else {
+                continue;
+            };
+            let args = m.child_by_field_name("arguments").and_then(|n| {
+                let text = self.text(n);
+                let inner = text
+                    .strip_prefix('(')
+                    .and_then(|t| t.strip_suffix(')'))
+                    .unwrap_or(&text)
+                    .trim()
+                    .to_string();
+                (!inner.is_empty()).then_some(inner)
+            });
+            out.push(Anno {
+                written: self.text(name),
+                args,
+                line: self.line(m),
+            });
         }
+        out
     }
 
-    /// An annotation's arguments as written, parentheses stripped — what
-    /// `@Qualifier("fast")` or `@PostMapping("/orders")` says beyond its name.
-    /// Verbatim: an argument's meaning is the framework's, not a parser's.
-    fn annotation_args(&self, node: TsNode) -> Option<String> {
-        let args = node.child_by_field_name("arguments")?;
-        let text = self.text(args);
-        let inner = text
-            .strip_prefix('(')
-            .and_then(|t| t.strip_suffix(')'))
-            .unwrap_or(&text)
-            .trim();
-        (!inner.is_empty()).then(|| inner.to_string())
+    /// Records one injection point. `kind` is the evidence the caller holds —
+    /// the annotation it read, or the constructor it knows Spring injects —
+    /// and `on` is what was annotated, for the bean name a `@Qualifier` states.
+    fn injection(&mut self, owner: &str, name: &str, ty: TsNode, kind: &str, on: &[Anno]) {
+        let qualifier = on
+            .iter()
+            .find(|a| a.written == "Qualifier" || a.written == "Resource")
+            .and_then(|a| a.args.clone());
+        self.facts.injections.push(Injection {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            written: self.type_name(ty).unwrap_or_default(),
+            args: self.generic_args(ty),
+            kind: kind.to_string(),
+            qualifier,
+        });
+    }
+
+    /// Is one of these the annotation Spring reads as "inject this"?
+    fn is_injected(on: &[Anno]) -> bool {
+        on.iter()
+            .any(|a| INJECT_ANNOTATIONS.contains(&a.written.as_str()))
+    }
+
+    /// A generic type's arguments as written — `List<Handler>` subscripts
+    /// `Handler`, which is the bean a collection injection point asks for.
+    fn generic_args(&self, node: TsNode) -> Vec<String> {
+        if node.kind() != "generic_type" {
+            return Vec::new();
+        }
+        node.named_children(&mut node.walk())
+            .find(|c| c.kind() == "type_arguments")
+            .map(|a| {
+                a.named_children(&mut a.walk())
+                    .filter_map(|t| self.type_name(t))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Records every call a body makes.

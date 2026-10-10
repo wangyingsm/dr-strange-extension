@@ -4,7 +4,7 @@
 //! every clause turned into its edge. Once, over every chunk's facts, in
 //! chunk order.
 
-use crate::{CallKind, Edge, FileFacts, Node, Props, edge_at};
+use crate::{CallKind, Edge, FileFacts, Injection, Node, Props, edge_at};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,6 +62,36 @@ const JAVA_LANG: &[&str] = &[
     "Process",
     "Runtime",
 ];
+
+/// What one `USES_TYPE` edge says: the positions its owner names the type in,
+/// the first name it does so under, and how the dependency arrives.
+struct Uses {
+    roles: BTreeSet<String>,
+    name: String,
+    injected: Option<&'static str>,
+}
+
+impl Uses {
+    /// Keeps the strongest evidence seen: an annotation someone wrote outranks
+    /// a constructor Spring injects by convention.
+    fn take_injection(&mut self, found: Option<&&Injection>) {
+        match found.map(|i| i.kind.as_str()) {
+            Some("annotation") => self.injected = Some("annotation"),
+            Some("constructor") if self.injected.is_none() => {
+                self.injected = Some("constructor");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// How much an injection's evidence is worth, ranked as `test_flag`'s is.
+fn injection_confidence(kind: &str) -> &'static str {
+    match kind {
+        "annotation" => "definitive",
+        _ => "strong",
+    }
+}
 
 /// What a parsed type offers a resolver: its method surface and its bases.
 struct TypeEntry {
@@ -324,6 +354,18 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
+    // Injection points by the type and the name they arrive under — which is
+    // how a receiver reaches one: `repo.save()` in a bean asks what wired
+    // `repo`.
+    let mut inject_ix: BTreeMap<(String, String), &Injection> = BTreeMap::new();
+    for f in &all {
+        for i in &f.injections {
+            inject_ix
+                .entry((i.owner.clone(), i.name.clone()))
+                .or_insert(i);
+        }
+    }
+
     let stamped = |src: &str, dst: &str, line: u64, strategy: &str, written: &str| -> Edge {
         let mut e = edge_at(src, dst, "CALLS", line);
         e.props
@@ -572,7 +614,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     // The same in-tree rule as the hints above, and it has to hold here: the
     // implied-node pass below mints a bare `Type` for any endpoint nothing
     // declares, so an edge to `String` would put `String` in the graph.
-    let mut uses: BTreeMap<(String, String), (BTreeSet<String>, String)> = BTreeMap::new();
+    let mut uses: BTreeMap<(String, String), Uses> = BTreeMap::new();
     let mut foreign_type_refs = 0usize;
     for f in &all {
         for r in &f.type_refs {
@@ -580,10 +622,13 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 // A type that mentions itself is a real shape and a useless
                 // edge.
                 Ok((key, true)) if key != r.owner => {
-                    let slot = uses
-                        .entry((r.owner.clone(), key))
-                        .or_insert_with(|| (BTreeSet::new(), r.name.clone()));
-                    slot.0.insert(r.role.clone());
+                    let slot = uses.entry((r.owner.clone(), key)).or_insert_with(|| Uses {
+                        roles: BTreeSet::new(),
+                        name: r.name.clone(),
+                        injected: None,
+                    });
+                    slot.roles.insert(r.role.clone());
+                    slot.take_injection(inject_ix.get(&(r.owner.clone(), r.name.clone())));
                 }
                 Ok((_, true)) => {}
                 _ => foreign_type_refs += 1,
@@ -591,18 +636,32 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
     let type_ref_edges = uses.len();
-    for ((owner, target), (roles, name)) in uses {
+    let injected_edges = uses.values().filter(|u| u.injected.is_some()).count();
+    for ((owner, target), u) in uses {
         let mut e = edge_at(&owner, &target, "USES_TYPE", 0);
         e.props.remove("line");
         e.props.insert(
             "role".into(),
             serde_json::json!({
                 "$desc": "the type position this declaration names the type in",
-                "$value": roles.iter().cloned().collect::<Vec<_>>().join(", "),
+                "$value": u.roles.iter().cloned().collect::<Vec<_>>().join(", "),
             }),
         );
-        if !name.is_empty() {
-            e.props.insert("name".into(), Value::String(name));
+        if !u.name.is_empty() {
+            e.props.insert("name".into(), Value::String(u.name));
+        }
+        if let Some(kind) = u.injected {
+            e.props.insert(
+                "injected".into(),
+                serde_json::json!({
+                    "$desc": "what says a container wires this dependency",
+                    "$value": kind,
+                }),
+            );
+            e.props.insert(
+                "_injected_confidence".into(),
+                Value::String(injection_confidence(kind).into()),
+            );
         }
         out.edges.push(e);
     }
@@ -659,6 +718,12 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
              declaration's fields, parameters and returns are typed by; \
              {foreign_type_refs} more name types this tree does not declare and \
              are left as written text on the node"
+        ));
+    }
+    if injected_edges > 0 {
+        out.notes.push(format!(
+            "{injected_edges} of those are injection points — a dependency a \
+             container wires, marked `injected` with what the evidence was"
         ));
     }
     out

@@ -747,3 +747,107 @@ fn declared_types_become_uses_type_edges() {
         }
     }
 }
+
+/// How a dependency arrives rides its `USES_TYPE` edge: an `@Autowired` is
+/// written down, a stereotyped bean's only constructor is Spring's convention,
+/// and a dependency the owner builds itself is neither.
+#[test]
+fn an_injected_dependency_says_what_wired_it() {
+    let a = run(vec![
+        (
+            "Port.java",
+            "package m;\n\npublic interface Port {\n    void go();\n}\n",
+        ),
+        (
+            "Other.java",
+            "package m;\n\npublic interface Other {\n    void go();\n}\n",
+        ),
+        (
+            "Wired.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Wired {\n    @Autowired\n    private Port port;\n\n    void use() {\n        port.go();\n    }\n}\n",
+        ),
+        (
+            "Built.java",
+            "package m;\n\nclass Built {\n    private Port port = null;\n}\n",
+        ),
+        (
+            "Ctor.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Ctor {\n    private final Port port;\n    private final Other other;\n\n    Ctor(Port port, Other other) {\n        this.port = port;\n        this.other = other;\n    }\n}\n",
+        ),
+        (
+            "Plain.java",
+            "package m;\n\nclass Plain {\n    private final Port port;\n\n    Plain(Port port) {\n        this.port = port;\n    }\n}\n",
+        ),
+    ]);
+
+    let injected = |src: &str, dst: &str| -> Option<String> {
+        a.edges
+            .iter()
+            .find(|e| e.ty == "USES_TYPE" && e.src == src && e.dst == dst)
+            .and_then(|e| e.props.get("injected"))
+            .map(|v| text(&v["$value"]).to_string())
+    };
+    let confidence = |src: &str, dst: &str| -> Option<String> {
+        a.edges
+            .iter()
+            .find(|e| e.ty == "USES_TYPE" && e.src == src && e.dst == dst)
+            .and_then(|e| e.props.get("_injected_confidence"))
+            .map(|v| text(v).to_string())
+    };
+
+    assert_eq!(injected("m.Wired", "m.Port").as_deref(), Some("annotation"));
+    assert_eq!(
+        confidence("m.Wired", "m.Port").as_deref(),
+        Some("definitive")
+    );
+    assert_eq!(injected("m.Ctor", "m.Port").as_deref(), Some("constructor"));
+    assert_eq!(
+        injected("m.Ctor", "m.Other").as_deref(),
+        Some("constructor")
+    );
+    assert_eq!(confidence("m.Ctor", "m.Port").as_deref(), Some("strong"));
+    // A field the owner assigns itself, and a constructor on a type no
+    // container knows about, are not injection points.
+    assert_eq!(injected("m.Built", "m.Port"), None);
+    assert_eq!(injected("m.Plain", "m.Port"), None);
+    note_containing(&a, "injection points");
+}
+
+/// A setter Spring calls is an injection point too. A parameter carries no
+/// node of its own, so its `@Qualifier` rides the injection fact — where the
+/// dispatch rule reads it — rather than an edge.
+#[test]
+fn a_setter_injection_keeps_its_qualifier() {
+    let m = MapFiles {
+        files: vec![(
+            "Host.java",
+            "package m;\n\nimport org.spring.Autowired;\nimport org.spring.Qualifier;\nimport org.spring.Service;\n\n@Service\nclass Host {\n    private Port port;\n\n    @Autowired\n    void setPort(@Qualifier(\"fast\") Port port) {\n        this.port = port;\n    }\n}\n",
+        )],
+    };
+    let facts = parse_chunk(&m, &m.list(".java").unwrap(), false);
+    let i = facts[0]
+        .injections
+        .iter()
+        .find(|i| i.name == "port")
+        .expect("the setter's parameter is an injection point");
+    assert_eq!(i.owner, "m.Host");
+    assert_eq!(i.kind, "annotation");
+    assert_eq!(i.written, "Port");
+    assert_eq!(i.qualifier.as_deref(), Some("\"fast\""));
+}
+
+/// A collection injection point keeps what it subscripts: Spring hands it
+/// every bean of the element type, and the head (`List`) says nothing.
+#[test]
+fn a_collection_injection_point_keeps_its_element() {
+    let m = MapFiles {
+        files: vec![(
+            "Dispatcher.java",
+            "package m;\n\nimport java.util.List;\nimport org.spring.Autowired;\nimport org.spring.Service;\n\n@Service\nclass Dispatcher {\n    @Autowired\n    private List<Handler> handlers;\n}\n",
+        )],
+    };
+    let facts = parse_chunk(&m, &m.list(".java").unwrap(), false);
+    let i = &facts[0].injections[0];
+    assert_eq!(i.written, "List");
+    assert_eq!(i.args, vec!["Handler".to_string()]);
+}
