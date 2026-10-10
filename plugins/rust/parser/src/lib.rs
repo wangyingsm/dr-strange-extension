@@ -2488,7 +2488,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     ));
                 }
                 impl_calls.extend(m.calls.iter().map(|c| {
-                    let path = c.path.as_deref().map(&deself);
+                    let path = c.path.as_deref().map(deself);
                     (
                         mkey.clone(),
                         f.path.clone(),
