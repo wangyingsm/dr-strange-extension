@@ -417,7 +417,7 @@ impl<'a> Walker<'a> {
         while let Some(node) = stack.pop() {
             match node.kind() {
                 "function_declaration" => {
-                    if let Some(name) = node.child_by_field_name("name").map(&text) {
+                    if let Some(name) = node.child_by_field_name("name").map(text) {
                         functions.push((name, node));
                     }
                 }
@@ -425,7 +425,7 @@ impl<'a> Walker<'a> {
                     for d in node.named_children(&mut node.walk()) {
                         if d.kind() == "variable_declarator"
                             && let (Some(name), Some(value)) = (
-                                d.child_by_field_name("name").map(&text),
+                                d.child_by_field_name("name").map(text),
                                 d.child_by_field_name("value"),
                             )
                             && matches!(value.kind(), "arrow_function" | "function_expression")
@@ -451,7 +451,7 @@ impl<'a> Walker<'a> {
             let mut props = Props::new();
             let params = fn_node
                 .child_by_field_name("parameters")
-                .map(&text)
+                .map(text)
                 .unwrap_or_default();
             props.insert(
                 "signature".into(),
