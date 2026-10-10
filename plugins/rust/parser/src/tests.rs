@@ -3223,10 +3223,12 @@ fn a_closure_body_that_chains_through_its_own_hop_ends_on_the_budget() {
         .collect();
     // The cycle: typing `self.map()` asks its closure body for what the hop
     // yields, and that body is the same chain again.
-    let closure_bodies: BTreeMap<(String, String), String> =
-        [(("m::T::f".to_string(), "self.map()".to_string()), "self.map()".to_string())]
-            .into_iter()
-            .collect();
+    let closure_bodies: BTreeMap<(String, String), String> = [(
+        ("m::T::f".to_string(), "self.map()".to_string()),
+        "self.map()".to_string(),
+    )]
+    .into_iter()
+    .collect();
     let empty_vecs = BTreeMap::new();
     let empty_strs = BTreeMap::new();
     let empty_alias = BTreeMap::new();
