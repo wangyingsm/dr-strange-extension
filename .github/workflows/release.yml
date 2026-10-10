@@ -29,6 +29,7 @@ on:
       - "toml-v*"
       - "deps-v*"
       - "git-v*"
+      - "xml-v*"
 
 permissions:
   contents: write # create the GitHub Release, upload assets, commit the catalog
