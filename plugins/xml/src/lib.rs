@@ -13,6 +13,7 @@
 //! two halves of a Mapper meet in one graph.
 
 mod mybatis;
+mod sql;
 
 use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, output, simple_plugin};
 
@@ -107,7 +108,25 @@ fn extract(path: &str, text: &str, out: &mut Output) {
     match dialect(text) {
         Dialect::MybatisMapper => {
             let read = mybatis::read(path, text, out);
-            out.note(format!("{path}: {} statement(s) read", read.statements));
+            out.note(format!(
+                "{path}: {} statement(s) read, touching {} table(s) and {} column(s)",
+                read.statements, read.tables, read.columns
+            ));
+            if read.unbound_columns > 0 {
+                out.note(format!(
+                    "{path}: {} column(s) named without saying whose they are — several \
+                     tables and no qualifier, so they ride the statement rather than \
+                     an edge under a guess",
+                    read.unbound_columns
+                ));
+            }
+            if read.interpolated_tables > 0 {
+                out.note(format!(
+                    "{path}: {} statement(s) name their table with a `${{…}}`, so their \
+                     table list is what the text could say, not all of it",
+                    read.interpolated_tables
+                ));
+            }
             if read.foreign_includes > 0 {
                 out.note(format!(
                     "{path}: {} `<include refid>` named a fragment another file holds — \

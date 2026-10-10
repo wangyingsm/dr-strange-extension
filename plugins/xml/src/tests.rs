@@ -156,14 +156,15 @@ fn the_method_stand_in_is_external() {
     assert!(m.extra_labels.iter().any(|l| l == "External"));
 }
 
-/// An `<include>` splices the fragment it names, a dynamic branch contributes
-/// its text, and `#{…}` becomes the `?` the driver sends.
+/// An `<include>` splices the fragment it names and a dynamic branch
+/// contributes its text — while every marker stays exactly as written. What a
+/// `#{…}` turns into is the driver's business, not this reader's.
 #[test]
 fn a_statement_is_assembled_from_its_parts() {
     let out = run("resources/mapper/OrderMapper.xml", ORDER_MAPPER);
     assert_eq!(
         prop(&out, "resources/mapper/OrderMapper.xml#selectById", "sql"),
-        "SELECT id, user_id, total FROM orders WHERE id = ? AND paid = 1"
+        "SELECT id, user_id, total FROM orders WHERE id = #{id} AND paid = 1"
     );
 }
 
@@ -173,7 +174,7 @@ fn cdata_carries_the_sql_it_holds() {
     let out = run("resources/mapper/OrderMapper.xml", ORDER_MAPPER);
     assert_eq!(
         prop(&out, "resources/mapper/OrderMapper.xml#olderThan", "sql"),
-        "SELECT id FROM orders WHERE created < ?"
+        "SELECT id FROM orders WHERE created < #{cutoff}"
     );
 }
 
@@ -220,4 +221,182 @@ fn a_statement_knows_its_place_in_the_file() {
         props.get("file").and_then(|v| v.as_str()),
         Some("resources/mapper/OrderMapper.xml")
     );
+}
+
+/// The reporter's question — *which columns does this query use* — answered on
+/// the mapper above: one table, so every column in the statement binds to it.
+#[test]
+fn a_statement_reaches_the_table_and_columns_it_touches() {
+    let out = run("resources/mapper/OrderMapper.xml", ORDER_MAPPER);
+    let stmt = "resources/mapper/OrderMapper.xml#selectById";
+    assert!(has_edge(&out, stmt, "READS", "orders"));
+    for column in ["id", "user_id", "total", "paid"] {
+        let key = format!("orders.{column}");
+        assert!(
+            has_edge(&out, stmt, "USES_COLUMN", &key),
+            "{stmt} uses {key}"
+        );
+        assert!(
+            has_edge(&out, "orders", "HAS_COLUMN", &key),
+            "orders has {key}"
+        );
+    }
+}
+
+/// A table and a column name something outside the tree, so both are
+/// `External` — which is what lets a future reader of the schema itself agree
+/// on these keys rather than collide with them.
+#[test]
+fn tables_and_columns_are_external() {
+    let out = run("resources/mapper/OrderMapper.xml", ORDER_MAPPER);
+    for key in ["orders", "orders.id"] {
+        let n = out.nodes.iter().find(|n| n.key == key).expect(key);
+        assert!(n.extra_labels.iter().any(|l| l == "External"), "{key}");
+    }
+    assert_eq!(
+        out.nodes.iter().find(|n| n.key == "orders").unwrap().label,
+        "Table"
+    );
+    assert_eq!(
+        out.nodes
+            .iter()
+            .find(|n| n.key == "orders.id")
+            .unwrap()
+            .label,
+        "Column"
+    );
+}
+
+/// An update writes where a select reads: the direction impact analysis wants,
+/// told by the keyword that introduced the table.
+#[test]
+fn an_update_writes_its_table() {
+    let out = run("resources/mapper/OrderMapper.xml", ORDER_MAPPER);
+    let stmt = "resources/mapper/OrderMapper.xml#markPaid";
+    assert!(has_edge(&out, stmt, "WRITES", "orders"));
+    assert!(!has_edge(&out, stmt, "READS", "orders"));
+}
+
+/// `SELECT *` names no columns. The result map is where they are written down,
+/// and with one table they bind to it.
+#[test]
+fn a_result_map_names_the_columns_a_star_select_hides() {
+    let out = run(
+        "m.xml",
+        r#"<mapper namespace="a.OrderMapper">
+  <resultMap id="orderMap" type="a.Order">
+    <id column="id" property="id"/>
+    <result column="user_name" property="userName"/>
+  </resultMap>
+  <select id="all" resultMap="orderMap">SELECT * FROM orders</select>
+</mapper>"#,
+    );
+    assert!(has_edge(&out, "m.xml#all", "USES_COLUMN", "orders.id"));
+    assert!(has_edge(
+        &out,
+        "m.xml#all",
+        "USES_COLUMN",
+        "orders.user_name"
+    ));
+}
+
+/// Two tables and a bare column: it is named on the statement, and no edge
+/// puts it under the wrong table.
+#[test]
+fn an_unbound_column_rides_the_statement() {
+    let out = run(
+        "m.xml",
+        r#"<mapper namespace="a.M">
+  <select id="j">SELECT u.id, created FROM users u JOIN orders o ON o.user_id = u.id</select>
+</mapper>"#,
+    );
+    assert_eq!(prop(&out, "m.xml#j", "unbound_columns"), "created");
+    assert!(!out.edges.iter().any(|e| e.dst.ends_with(".created")));
+    assert!(has_edge(&out, "m.xml#j", "USES_COLUMN", "users.id"));
+}
+
+// ---- the MyBatis surface, across its versions -----------------------------
+
+/// `<set>`, `<where>`, `<trim>` and `<foreach>` carry SQL in their attributes
+/// rather than their text. Without it an update's assignments read as an alias
+/// of the table and the columns are lost.
+#[test]
+fn dynamic_tags_contribute_the_sql_their_attributes_hold() {
+    let out = run(
+        "m.xml",
+        r#"<mapper namespace="a.M">
+  <update id="patch">
+    UPDATE orders
+    <set>
+      <if test="paid != null">paid = #{paid},</if>
+      <if test="total != null">total = #{total},</if>
+    </set>
+    <where>id = #{id}</where>
+  </update>
+  <insert id="add">
+    INSERT INTO orders
+    <trim prefix="(" suffix=")" suffixOverrides=",">
+      <if test="id != null">id,</if>
+      <if test="total != null">total,</if>
+    </trim>
+    VALUES
+    <foreach item="r" collection="rows" open="(" separator="," close=")">#{r.id}</foreach>
+  </insert>
+</mapper>"#,
+    );
+    assert_eq!(
+        prop(&out, "m.xml#patch", "sql"),
+        "UPDATE orders SET paid = #{paid}, total = #{total}, WHERE id = #{id}"
+    );
+    assert!(has_edge(&out, "m.xml#patch", "WRITES", "orders"));
+    for c in ["orders.paid", "orders.total", "orders.id"] {
+        assert!(has_edge(&out, "m.xml#patch", "USES_COLUMN", c), "{c}");
+    }
+    assert_eq!(
+        prop(&out, "m.xml#add", "sql"),
+        "INSERT INTO orders ( id, total, ) VALUES ( #{r.id} )"
+    );
+    assert!(has_edge(&out, "m.xml#add", "WRITES", "orders"));
+}
+
+/// The same `id` may be written once per vendor, and the container picks by
+/// the configured `databaseId`. Both are statements, and neither displaces
+/// the other.
+#[test]
+fn a_statement_per_vendor_is_a_statement_each() {
+    let out = run(
+        "m.xml",
+        r#"<mapper namespace="a.M">
+  <select id="now" databaseId="mysql" resultType="long">SELECT UNIX_TIMESTAMP() FROM dual</select>
+  <select id="now" databaseId="oracle" resultType="long">SELECT SYSDATE FROM dual</select>
+</mapper>"#,
+    );
+    assert_eq!(prop(&out, "m.xml#now@mysql", "database_id"), "mysql");
+    assert_eq!(prop(&out, "m.xml#now@oracle", "database_id"), "oracle");
+    // Both implement the one method, which is what the container chooses from.
+    assert!(has_edge(&out, "m.xml#now@mysql", "IMPLEMENTS", "a.M.now"));
+    assert!(has_edge(&out, "m.xml#now@oracle", "IMPLEMENTS", "a.M.now"));
+}
+
+/// A statement may name several result maps, and a map may extend another —
+/// both of which name columns a `SELECT *` does not.
+#[test]
+fn result_maps_compose() {
+    let out = run(
+        "m.xml",
+        r#"<mapper namespace="a.M">
+  <resultMap id="base" type="a.Order">
+    <id column="id" property="id"/>
+  </resultMap>
+  <resultMap id="full" type="a.Order" extends="base">
+    <result column="total" property="total"/>
+    <association column="user_id" property="user" select="a.U.byId"/>
+    <discriminator column="kind" javaType="string"/>
+  </resultMap>
+  <select id="all" resultMap="full">SELECT * FROM orders</select>
+</mapper>"#,
+    );
+    for c in ["orders.id", "orders.total", "orders.user_id", "orders.kind"] {
+        assert!(has_edge(&out, "m.xml#all", "USES_COLUMN", c), "{c}");
+    }
 }
