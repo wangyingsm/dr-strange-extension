@@ -75,6 +75,15 @@
       "min_drsg": "2.0.0"
     },
     {
+      "name": "xml",
+      "version": "1.0.0",
+      "claims": ".xml",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/xml-v1.0.0/xml.wasm",
+      "sha256": "307cc03fdd894565ed90acf3e3a3e425e02f63c55528d8b1f114524a35b06d53",
+      "contract": "1.0.0",
+      "min_drsg": "2.0.0"
+    },
+    {
       "name": "git",
       "version": "1.0.0",
       "claims": "a repository's history",
