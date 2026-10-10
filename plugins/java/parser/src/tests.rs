@@ -276,6 +276,43 @@ fn inherited_calls_walk_the_extends_chain() {
     assert!(has_edge(&a, "m.Sub.go", "CALLS", "m.Base.helper"));
 }
 
+/// A class's interfaces are ancestry too: an interface's `default` answers an
+/// inherited call.
+#[test]
+fn an_interface_default_method_answers_an_inherited_call() {
+    let a = run(vec![
+        (
+            "Greeter.java",
+            "package m;\n\ninterface Greeter {\n    default void hello() {}\n}\n",
+        ),
+        (
+            "Host.java",
+            "package m;\n\nclass Host implements Greeter {\n    void go() {\n        hello();\n    }\n}\n",
+        ),
+    ]);
+    assert!(has_edge(&a, "m.Host", "IMPLEMENTS", "m.Greeter"));
+    assert!(has_edge(&a, "m.Host.go", "CALLS", "m.Greeter.hello"));
+}
+
+/// `super.m()` is the superclass's, never an interface's — Java spells the
+/// other one `Greeter.super.m()`. An external superclass leaves it unresolved
+/// rather than binding to the interface that happens to declare the name.
+#[test]
+fn super_does_not_reach_an_implemented_interface() {
+    let a = run(vec![
+        (
+            "Greeter.java",
+            "package m;\n\ninterface Greeter {\n    default void hello() {}\n}\n",
+        ),
+        (
+            "Host.java",
+            "package m;\n\nimport java.util.ArrayList;\n\nclass Host extends ArrayList<String> implements Greeter {\n    void go() {\n        super.hello();\n    }\n}\n",
+        ),
+    ]);
+    assert!(!has_edge(&a, "m.Host.go", "CALLS", "m.Greeter.hello"));
+    note_containing(&a, "left unresolved");
+}
+
 /// Calls into libraries this tree does not hold become external stand-ins;
 /// `java.lang` needs no import to be known.
 #[test]

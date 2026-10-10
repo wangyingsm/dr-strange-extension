@@ -63,9 +63,18 @@ const JAVA_LANG: &[&str] = &[
     "Runtime",
 ];
 
+/// What a parsed type offers a resolver: its method surface and its bases.
+struct TypeEntry {
+    methods: BTreeSet<String>,
+    /// The superclass, or an interface's extended interfaces.
+    extends: Vec<String>,
+    /// A class's interfaces.
+    implements: Vec<String>,
+}
+
 struct Index {
-    /// Every type this run parsed: qualified name → (methods, extends).
-    types: BTreeMap<String, (BTreeSet<String>, Vec<String>)>,
+    /// Every type this run parsed, by qualified name.
+    types: BTreeMap<String, TypeEntry>,
     /// package → simple name → qualified, for same-package resolution.
     by_package: BTreeMap<String, BTreeMap<String, String>>,
     packages: BTreeSet<String>,
@@ -122,8 +131,8 @@ impl Index {
         Err(())
     }
 
-    /// Does `type_key` answer `method`, on itself or up its in-tree extends
-    /// chain? Returns the type that declares it.
+    /// Does `type_key` answer `method`, on itself or up its in-tree ancestry —
+    /// superclass and interfaces both? Returns the type that declares it.
     fn find_method(
         &self,
         f: &FileFacts,
@@ -134,12 +143,12 @@ impl Index {
         if depth > 16 {
             return None;
         }
-        let (methods, extends) = self.types.get(type_key)?;
-        if methods.contains(method) {
+        let entry = self.types.get(type_key)?;
+        if entry.methods.contains(method) {
             return Some(type_key.to_string());
         }
-        for base in extends.clone() {
-            if let Ok((base_key, true)) = self.type_ref(&base, f)
+        for base in entry.extends.iter().chain(&entry.implements) {
+            if let Ok((base_key, true)) = self.type_ref(base, f)
                 && let Some(found) = self.find_method(f, &base_key, method, depth + 1)
             {
                 return Some(found);
@@ -190,9 +199,11 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 .or_insert_with(|| doc.clone());
         }
         for t in &f.types {
-            ix.types
-                .entry(t.key.clone())
-                .or_insert_with(|| (t.methods.iter().cloned().collect(), t.extends.clone()));
+            ix.types.entry(t.key.clone()).or_insert_with(|| TypeEntry {
+                methods: t.methods.iter().cloned().collect(),
+                extends: t.extends.clone(),
+                implements: t.implements.clone(),
+            });
             if let Some(simple) = t.key.rsplit('.').next()
                 && t.key
                     .strip_suffix(simple)
@@ -503,7 +514,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     let resolved = ix
                         .types
                         .get(&c.in_type)
-                        .map(|(_, ext)| ext.clone())
+                        .map(|e| e.extends.clone())
                         .unwrap_or_default()
                         .iter()
                         .find_map(|base| {

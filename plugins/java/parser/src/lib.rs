@@ -131,6 +131,11 @@ pub struct TypeDecl {
     pub methods: Vec<String>,
     /// `extends` targets as written, for the inherited-call walk.
     pub extends: Vec<String>,
+    /// A class's `implements` targets as written. In the method walk, where an
+    /// interface's `default` answers an inherited call, but out of the
+    /// `super.m()` walk, which Java sends to the superclass alone.
+    #[serde(default)]
+    pub implements: Vec<String>,
 }
 
 /// Everything one file contributes — the opaque partial the component
@@ -436,6 +441,7 @@ impl Walker<'_> {
             key: key.clone(),
             methods: Vec::new(),
             extends: Vec::new(),
+            implements: Vec::new(),
         };
 
         // extends / implements are syntax. A generic base extends what it
@@ -459,6 +465,7 @@ impl Walker<'_> {
                                 decl.extends.push(written.clone());
                                 "EXTENDS"
                             } else {
+                                decl.implements.push(written.clone());
                                 "IMPLEMENTS"
                             };
                             self.facts
