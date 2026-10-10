@@ -58,7 +58,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           plugin="${tag%%-v*}"
           case "$plugin" in
-            toml|deps)
+            toml|deps|xml)
                    artifact="plugins/$plugin/target/wasm32-wasip2/release/drsg_plugin_$plugin.wasm" ;;
             go)    artifact="plugins/go/component/go.wasm" ;;
             rust|ts|py|c|java|web|git)

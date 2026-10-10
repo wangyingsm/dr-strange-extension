@@ -98,6 +98,11 @@ java-plugin:
 toml-plugin:
     cd plugins/toml && cargo build --release --target wasm32-wasip2
 
+# XML, by the dialect a file declares. Pure Rust like the two above: quick-xml
+# needs no C, so this one builds without wasi-sdk.
+xml-plugin:
+    cd plugins/xml && cargo build --release --target wasm32-wasip2
+
 # The manifest reader: pure Rust, no grammar and no C — what it reads is JSON,
 # TOML, XML and two line formats, and every reader for those is a crate.
 deps-plugin:

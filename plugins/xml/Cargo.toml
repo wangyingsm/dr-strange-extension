@@ -1,0 +1,20 @@
+[package]
+name = "drsg-plugin-xml"
+description = "A dr-strange preprocessor plugin for XML — dialects it knows become facts, the rest stays prose"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK and nothing else of ours. This is the position a third-party author
+# is in, and the reason it is checked rather than assumed.
+[dependencies]
+dr-strange-ext = { path = "../../sdk/rust" }
+# The family's XML reader already — `deps` reads `pom.xml` with it. Pure Rust,
+# so this plugin needs no C grammar and no wasi-sdk to build.
+quick-xml = { version = "0.37", default-features = false }
+
+[workspace]
+members = []
