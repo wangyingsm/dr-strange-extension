@@ -1390,3 +1390,27 @@ fn an_arrow_held_in_a_const_is_a_handler() {
         "so the module holds none of it"
     );
 }
+
+/// A decorated class is ordinary TypeScript, and the whole file was dropped
+/// without the dialect flag that admits it — a Nest or Angular project
+/// contributed nothing at all.
+#[test]
+fn a_decorated_file_is_parsed_not_dropped() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/cats.controller.ts",
+            r#"
+        @Controller('cats')
+        export class CatsController {
+            constructor(private readonly svc: CatsService) {}
+            @Get(':id') one(@Param('id') id: string) { return this.svc.find(id); }
+        }
+        "#,
+        ),
+    ]));
+    node(&a, "web/src/cats.controller.CatsController");
+    node(&a, "web/src/cats.controller.CatsController.one");
+    node(&a, "web/src/cats.controller.CatsController.constructor");
+    assert_eq!(a.skipped, 0, "nothing was dropped");
+}

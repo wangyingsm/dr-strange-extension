@@ -417,18 +417,29 @@ fn module_id(package: &Package, file: &str) -> String {
     }
 }
 
+/// Decorators are on for every dialect: a Nest or Angular file is ordinary
+/// TypeScript that does not parse at all without them, and a file that parsed
+/// before parses the same way with them.
 fn syntax_for(path: &str) -> Syntax {
     match path.rsplit('.').next().unwrap_or("") {
-        "ts" | "mts" | "cts" => Syntax::Typescript(TsSyntax::default()),
+        "ts" | "mts" | "cts" => Syntax::Typescript(TsSyntax {
+            decorators: true,
+            ..Default::default()
+        }),
         "tsx" => Syntax::Typescript(TsSyntax {
             tsx: true,
+            decorators: true,
             ..Default::default()
         }),
         "jsx" => Syntax::Es(EsSyntax {
             jsx: true,
+            decorators: true,
             ..Default::default()
         }),
-        _ => Syntax::Es(EsSyntax::default()),
+        _ => Syntax::Es(EsSyntax {
+            decorators: true,
+            ..Default::default()
+        }),
     }
 }
 
