@@ -217,21 +217,6 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
-    // ---- the two halves, written on the symbols that state them -----------
-    // Never a node or an edge of their own: a request and the declaration
-    // that serves it are matched when someone asks, and an edge drawn here
-    // would freeze a guess about which handler that is.
-    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
-    let served = route::Routes::of(route::Side::Serves, all.iter().flat_map(|f| &f.declares));
-    let mut recorded = 0usize;
-    let mut declares = 0usize;
-    for node in &mut out.nodes {
-        recorded += asked.write(&node.key, &mut node.props);
-        declares += served.write(&node.key, &mut node.props);
-    }
-    out.notes.extend(served.note(declares));
-    out.notes.extend(asked.note(recorded));
-
     let mut edge_set: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut pending: Vec<Edge> = Vec::new();
     let add_edge =
@@ -327,6 +312,40 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             [] => None,
         }
     };
+    // ---- the two halves, written on the symbols that state them -----------
+    // Never a node or an edge of their own: a request and the declaration
+    // that serves it are matched when someone asks, and an edge drawn here
+    // would freeze a guess about which handler that is.
+    //
+    // A decorator names its handler by being written on it; a module-level
+    // registration names it by a word, so that word is resolved here — and
+    // when it names nothing this tree declares, the module that registered
+    // the route holds it, which is the only symbol there is.
+    let mut served_refs: Vec<route::RouteRef> = Vec::new();
+    for f in &all {
+        served_refs.extend(f.declares.iter().cloned());
+        let bindings = file_bindings(f);
+        for m in &f.mounts {
+            let symbol = decl_of(f, &bindings, &m.handler).unwrap_or_else(|| m.module.clone());
+            served_refs.push(route::RouteRef {
+                symbol,
+                verb: None,
+                written: m.written.clone(),
+                line: m.line,
+            });
+        }
+    }
+    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
+    let served = route::Routes::of(route::Side::Serves, &served_refs);
+    let mut recorded = 0usize;
+    let mut declares = 0usize;
+    for node in &mut out.nodes {
+        recorded += asked.write(&node.key, &mut node.props);
+        declares += served.write(&node.key, &mut node.props);
+    }
+    out.notes.extend(served.note(declares));
+    out.notes.extend(asked.note(recorded));
+
     // Declared returns first: a constructed hint may type through a factory.
     let mut returns_ix: BTreeMap<String, String> = BTreeMap::new();
     let mut bases_ix: BTreeMap<String, Vec<String>> = BTreeMap::new();

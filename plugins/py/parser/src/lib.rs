@@ -252,6 +252,31 @@ pub struct FileFacts {
     /// needed to know whose route it is.
     #[serde(default)]
     pub declares: Vec<route::RouteRef>,
+    /// The routes this module mounts — a module-level call handing a path to
+    /// a view, which is how Django writes a URL conf. The handler's name is
+    /// resolved in [`assemble`].
+    #[serde(default)]
+    pub mounts: Vec<Mounted>,
+}
+
+/// One route a module-level registration states, before its handler is
+/// named.
+///
+/// `path("orders/<int:id>", views.one)` writes no leading slash, because the
+/// project's own `include()` supplies it. A path written that way cannot be
+/// told from an ordinary string by its shape alone, so this is recorded only
+/// when the call hands it to something — which is the same rule the other
+/// languages' registrations are read by.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mounted {
+    /// The module that registered it: the symbol holding the route when the
+    /// handler cannot be named.
+    pub module: String,
+    pub written: String,
+    pub line: u64,
+    /// The handler as written — a bare name, a dotted name, or the class an
+    /// `as_view()` call is made on.
+    pub handler: String,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -410,6 +435,7 @@ fn parse_file(path: &str, module: &str, text: &str, include_source: bool) -> Fil
     let body = &parsed.syntax().body;
     w.module_doc(body);
     w.stmts(body);
+    w.module_routes(body);
 
     // Python's own star-import rule is the export list: `__all__` when the
     // module declares one, otherwise every name not underscore-prefixed.
@@ -605,6 +631,58 @@ impl Walker<'_> {
                 }
                 self.stmts(&t.orelse);
                 self.stmts(&t.finalbody);
+            }
+            _ => {}
+        }
+    }
+
+    /// The routes a module mounts in its own body: `urlpatterns = [path(…)]`,
+    /// which is where a Django project writes every one of them.
+    ///
+    /// A narrow walk on purpose — the assignments and bare calls of the
+    /// module's own body, and no descent into a view, whose body
+    /// [`Walker::collect_calls`] already covers.
+    fn module_routes(&mut self, body: &[ast::Stmt]) {
+        for stmt in body {
+            let values: Vec<&ast::Expr> = match stmt {
+                ast::Stmt::Assign(a) => vec![&a.value],
+                ast::Stmt::AugAssign(a) => vec![&a.value],
+                ast::Stmt::AnnAssign(a) => a.value.as_deref().into_iter().collect(),
+                ast::Stmt::Expr(e) => vec![&e.value],
+                _ => Vec::new(),
+            };
+            for value in values {
+                self.mounted(value);
+            }
+        }
+    }
+
+    /// One expression's registrations: a call, or a list or tuple of them.
+    fn mounted(&mut self, expr: &ast::Expr) {
+        match expr {
+            ast::Expr::List(l) => l.elts.iter().for_each(|e| self.mounted(e)),
+            ast::Expr::Tuple(t) => t.elts.iter().for_each(|e| self.mounted(e)),
+            ast::Expr::Call(call) => {
+                let Some(written) = call.arguments.args.iter().find_map(|a| match a {
+                    ast::Expr::StringLiteral(s) => {
+                        let text = s.value.to_str();
+                        mounted_path(text).then(|| text.to_string())
+                    }
+                    _ => None,
+                }) else {
+                    return;
+                };
+                let Some(handler) = call.arguments.args.iter().find_map(handed) else {
+                    return;
+                };
+                let line = self.line(call.range());
+                let module = self.module.clone();
+                self.facts.mounts.push(Mounted {
+                    module,
+                    written,
+                    line,
+                    handler,
+                });
             }
             _ => {}
         }
@@ -1411,6 +1489,38 @@ fn path_text(expr: &ast::Expr) -> Option<String> {
         _ => return None,
     };
     route::looks_like_path(&text).then_some(text)
+}
+
+/// Does this literal look like a path written by a router that mounts its own
+/// prefix — Django's `path("orders/<int:id>")`, with no leading slash because
+/// the project's `include()` supplies it?
+///
+/// A separator, a converter, or nothing at all (the project root). A bare
+/// word is not a path, which is what keeps an ordinary registry's
+/// `register("csv", write_csv)` from becoming a route.
+fn mounted_path(text: &str) -> bool {
+    if text.contains(char::is_whitespace) {
+        return false;
+    }
+    text.is_empty() || text.contains('/') || text.contains('<')
+}
+
+/// The handler a registration hands its path to, as written.
+///
+/// A bare name, a dotted name (`views.one`), or the class an `as_view()` call
+/// is made on — Django's class-based views, where the view is the class and
+/// the call is how it is turned into one.
+fn handed(e: &ast::Expr) -> Option<String> {
+    match e {
+        ast::Expr::Name(n) => Some(n.id.to_string()),
+        ast::Expr::Attribute(_) => dotted(e),
+        ast::Expr::Call(c) => {
+            let written = dotted(&c.func)?;
+            let (owner, last) = written.rsplit_once('.')?;
+            (last == "as_view").then(|| owner.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Every string literal an expression holds directly: the argument itself,

@@ -1187,3 +1187,83 @@ fn the_declarations_are_written_and_counted() {
         a.notes
     );
 }
+
+/// A Django URL conf hands each path to a view, and that view is what serves
+/// it — written with no leading slash, which only the handing makes readable
+/// as a path at all.
+#[test]
+fn a_url_conf_names_the_view_that_serves_each_path() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/views.py",
+            "def one(request, order_id):\n\
+             \x20   return order_id\n\
+             \n\
+             class Detail:\n\
+             \x20   def get(self, request):\n\
+             \x20       return None\n",
+        ),
+        (
+            "app/urls.py",
+            "from django.urls import path\n\
+             \n\
+             from . import views\n\
+             from .views import Detail\n\
+             \n\
+             urlpatterns = [\n\
+             \x20   path(\"orders/<int:order_id>\", views.one),\n\
+             \x20   path(\"detail/\", Detail.as_view()),\n\
+             \x20   path(\"\", views.one),\n\
+             ]\n",
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "app.views.one"),
+        vec!["* /".to_string(), "* /orders/{}".to_string()],
+        "the view is named, not the module that registered it"
+    );
+    assert_eq!(
+        serves(&a, "app.views.Detail"),
+        vec!["* /detail".to_string()],
+        "a class-based view is the class the `as_view()` call is made on"
+    );
+}
+
+/// A module-level registry that is not a router declares nothing: a bare word
+/// is no path, however it is handed on.
+#[test]
+fn a_registry_that_is_no_router_declares_nothing() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/registry.py",
+            "def write_csv(rows):\n\
+         \x20   return rows\n\
+         \n\
+         WRITERS = [\n\
+         \x20   register(\"csv\", write_csv),\n\
+         ]\n",
+        ),
+    ]));
+    assert!(
+        serves(&a, "app.registry.write_csv").is_empty(),
+        "`csv` has no separator and no converter, so it is a word"
+    );
+}
+
+/// A view this tree does not declare leaves the route on the module that
+/// mounted it — the only symbol there is, rather than a guess.
+#[test]
+fn an_unresolvable_view_leaves_the_route_on_its_module() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/urls.py",
+            "urlpatterns = [\n\
+             \x20   path(\"health/\", elsewhere.check),\n\
+             ]\n",
+        ),
+    ]));
+    assert_eq!(serves(&a, "app.urls"), vec!["* /health".to_string()]);
+}
