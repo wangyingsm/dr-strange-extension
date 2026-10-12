@@ -1080,3 +1080,110 @@ fn the_requests_are_counted_in_the_report() {
         a.notes
     );
 }
+
+// ---- the routes a decorator declares --------------------------------------
+
+/// The routes a function serves, as the property records them.
+fn serves(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("serves")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// FastAPI and Flask write a route the same way, and the verb is read from
+/// whichever of the two places states it.
+#[test]
+fn a_decorated_function_declares_what_it_serves() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "@app.get(\"/items/{item_id}\")\n\
+         def read_item(item_id: int):\n\
+         \x20   return item_id\n\
+         \n\
+         @router.delete(\"/items/{item_id}\")\n\
+         def drop(item_id: int):\n\
+         \x20   return None\n\
+         \n\
+         @app.route(\"/legacy\", methods=[\"POST\", \"PUT\"])\n\
+         def legacy():\n\
+         \x20   return None\n\
+         \n\
+         @app.route(\"/bridge/check\")\n\
+         def check():\n\
+         \x20   return None\n\
+         \n\
+         @lru_cache(maxsize=8)\n\
+         def helper():\n\
+         \x20   return None\n",
+    )]));
+    assert_eq!(
+        serves(&a, "api.read_item"),
+        vec!["GET /items/{}".to_string()],
+        "FastAPI's own spelling of a path variable"
+    );
+    assert_eq!(
+        serves(&a, "api.drop"),
+        vec!["DELETE /items/{}".to_string()],
+        "a router declares like an app"
+    );
+    assert_eq!(
+        serves(&a, "api.legacy"),
+        vec!["POST /legacy".to_string(), "PUT /legacy".to_string()],
+        "Flask states its verbs in a keyword, and each one is a route"
+    );
+    assert_eq!(
+        serves(&a, "api.check"),
+        vec!["* /bridge/check".to_string()],
+        "`route` with no methods names no verb, and `*` matches every one"
+    );
+    assert!(
+        !node(&a, "api.helper").props.contains_key("serves"),
+        "a decorator that carries no path declares no route"
+    );
+}
+
+/// `patch` names a verb and `mock.patch` is everywhere; its argument is a
+/// dotted name, not a path, and strict path-shape is what keeps it out.
+#[test]
+fn a_mock_patch_target_is_not_a_route() {
+    let a = run(&tree(vec![(
+        "test_api.py",
+        "@patch(\"pkg.mod.fetch\")\n\
+         def test_one(m):\n\
+         \x20   return m\n",
+    )]));
+    assert!(
+        serves(&a, "test_api.test_one").is_empty(),
+        "a module path is no route"
+    );
+}
+
+/// The source's own spelling is kept beside the comparable form, and the
+/// account says what was declared.
+#[test]
+fn the_declarations_are_written_and_counted() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "@app.get(\"/items/{item_id}\")\n\
+         def one(item_id: int):\n\
+         \x20   return item_id\n",
+    )]));
+    assert_eq!(
+        text(&node(&a, "api.one").props["serves_as_written"]["$value"][0]),
+        "/items/{item_id}",
+        "FastAPI's own spelling"
+    );
+    assert!(
+        a.notes.iter().any(|n| n.contains("declared by a handler")),
+        "{:?}",
+        a.notes
+    );
+}

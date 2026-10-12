@@ -247,6 +247,11 @@ pub struct FileFacts {
     /// a path. Attached to the calling function in [`assemble`].
     #[serde(default)]
     pub requests: Vec<route::RouteRef>,
+    /// The routes this file's functions declare — a decorator carrying a
+    /// path. The decorated function is the handler, so no resolution is
+    /// needed to know whose route it is.
+    #[serde(default)]
+    pub declares: Vec<route::RouteRef>,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -1234,6 +1239,7 @@ impl Walker<'_> {
             other => other,
         };
         let line = self.line(dec.range());
+        self.route_decl(decl_key, dec, line);
         match expr {
             ast::Expr::Name(n) => self.facts.calls.push(Call {
                 caller: decl_key.to_string(),
@@ -1252,6 +1258,60 @@ impl Walker<'_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The routes one decorator declares, if it declares any.
+    ///
+    /// `@app.get("/items/{id}")` (FastAPI), `@app.route("/x",
+    /// methods=["POST"])` (Flask) and `@router.delete("/x")` are one rule:
+    /// the verb is the name the decorator ends in, or whatever `methods=`
+    /// lists, and the path is the argument.
+    ///
+    /// Only a path-shaped literal counts, with no allowance for a path
+    /// written without its leading slash — which the frameworks require
+    /// anyway, and which is what keeps `@patch("pkg.mod.fn")` out: `patch`
+    /// names a verb and its argument is not a path.
+    fn route_decl(&mut self, decl_key: &str, dec: &ast::Decorator, line: u64) {
+        let ast::Expr::Call(call) = &dec.expression else {
+            return;
+        };
+        let written = dotted(&call.func).unwrap_or_default();
+        let last = written.rsplit('.').next().unwrap_or_default();
+        let mut verbs: Vec<Option<route::Verb>> =
+            route::Verb::from_name(last).map(Some).into_iter().collect();
+        // Flask states its verbs in a keyword rather than in the name it was
+        // called by: `@app.route("/x", methods=["POST", "PUT"])`.
+        for kw in &*call.arguments.keywords {
+            if kw.arg.as_ref().map(|a| a.id.as_str()) != Some("methods") {
+                continue;
+            }
+            for text in str_args(&kw.value) {
+                let verb = route::Verb::from_name(&text).map(Some);
+                if let Some(v) = verb
+                    && !verbs.contains(&v)
+                {
+                    verbs.push(v);
+                }
+            }
+        }
+        if verbs.is_empty() {
+            verbs.push(None);
+        }
+        for arg in &*call.arguments.args {
+            for path in str_args(arg) {
+                if !route::looks_like_path(&path) {
+                    continue;
+                }
+                for verb in &verbs {
+                    self.facts.declares.push(route::RouteRef {
+                        symbol: decl_key.to_string(),
+                        verb: *verb,
+                        written: path.clone(),
+                        line,
+                    });
+                }
+            }
         }
     }
 
@@ -1351,6 +1411,17 @@ fn path_text(expr: &ast::Expr) -> Option<String> {
         _ => return None,
     };
     route::looks_like_path(&text).then_some(text)
+}
+
+/// Every string literal an expression holds directly: the argument itself,
+/// or the elements of a list or tuple of them — `methods=["GET", "POST"]`.
+fn str_args(expr: &ast::Expr) -> Vec<String> {
+    match expr {
+        ast::Expr::StringLiteral(s) => vec![s.value.to_str().to_string()],
+        ast::Expr::List(l) => l.elts.iter().flat_map(str_args).collect(),
+        ast::Expr::Tuple(t) => t.elts.iter().flat_map(str_args).collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// `a.b.c` as written, when the expression is exactly a dotted name.
