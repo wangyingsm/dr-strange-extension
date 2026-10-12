@@ -261,11 +261,13 @@ pub struct RouteSite {
     pub handler: Option<Handler>,
 }
 
-/// The handler a registration call hands its path to.
+/// The handler a declaration hands its path to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Handler {
-    /// Written in place: an arrow or a function expression. A config object
-    /// never is, which is what keeps `axios.get('/x', cfg)` a request.
+    /// The symbol the route sits on is itself the handler: a method under
+    /// its own decorator, or an arrow written into the registration call. A
+    /// config object never is, which is what keeps `axios.get('/x', cfg)` a
+    /// request.
     InPlace,
     /// Named by a bare identifier, resolved in [`assemble`]: a declaration
     /// only when the name turns out to be an in-tree callable, which is what
@@ -1404,6 +1406,7 @@ impl Walker<'_> {
                 _ => {}
             }
         }
+        self.class_routes(&key, c);
     }
 
     fn class_method(
@@ -1893,6 +1896,80 @@ impl CallCollector<'_, '_> {
     }
 }
 
+/// Every string literal an expression holds directly: the argument itself, or
+/// the elements of an array of them — `@Get(['a', 'b'])` declares two.
+fn str_args(expr: &ast::Expr) -> Vec<String> {
+    match expr {
+        ast::Expr::Lit(ast::Lit::Str(s)) => vec![s.value.to_atom_lossy().to_string()],
+        ast::Expr::Array(a) => a
+            .elems
+            .iter()
+            .flatten()
+            .flat_map(|e| str_args(&e.expr))
+            .collect(),
+        ast::Expr::Paren(p) => str_args(&p.expr),
+        ast::Expr::TsAs(a) => str_args(&a.expr),
+        _ => Vec::new(),
+    }
+}
+
+/// A decorator's own name: `@Get(…)`, `@Nest.Get(…)`, `@Get`.
+fn decorator_name(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Call(c) => match &c.callee {
+            ast::Callee::Expr(e) => decorator_name(e),
+            _ => None,
+        },
+        ast::Expr::Ident(i) => Some(i.sym.to_string()),
+        ast::Expr::Member(m) => m.prop.as_ident().map(|p| p.sym.to_string()),
+        _ => None,
+    }
+}
+
+/// What one decorator states: the verb its name carries, and the paths its
+/// string arguments hold.
+///
+/// A decorator that names a verb is a route's, so its string argument is a
+/// path whether or not it was written with a leading slash — `@Get(':id')` is
+/// how Nest writes one. `lenient` says the same of a decorator that names no
+/// verb, which only a class's mount decorator is allowed. Otherwise a literal
+/// must be path-shaped to state anything, and `@Roles('admin')` states
+/// nothing.
+fn decorator_route(expr: &ast::Expr, lenient: bool) -> (Option<route::Verb>, Vec<String>) {
+    let verb = decorator_name(expr)
+        .as_deref()
+        .and_then(route::Verb::from_name);
+    let ast::Expr::Call(call) = expr else {
+        return (verb, Vec::new());
+    };
+    let loose = lenient || verb.is_some();
+    let paths = call
+        .args
+        .iter()
+        .flat_map(|a| str_args(&a.expr))
+        .filter(|t| {
+            route::looks_like_path(t)
+                || (loose && !t.is_empty() && !t.contains(char::is_whitespace))
+        })
+        .collect();
+    (verb, paths)
+}
+
+/// Is this the decorator a class is mounted by? The one name read rather
+/// than inferred, because a mount path is the only thing a framework writes
+/// with no slash and no verb to recognise it by: `@Controller('cats')`.
+fn mounts(expr: &ast::Expr) -> bool {
+    decorator_name(expr).is_some_and(|n| n.to_ascii_lowercase().ends_with("controller"))
+}
+
+/// What one method's decorators declare, before the class prefix applies.
+#[derive(Default)]
+struct Decorated {
+    verbs: Vec<route::Verb>,
+    paths: BTreeSet<String>,
+    line: u64,
+}
+
 /// What one call states about a route: the verb its callee names, the path an
 /// argument holds, and the handler it hands that path to.
 struct Stated {
@@ -2027,6 +2104,90 @@ impl Walker<'_> {
             verb,
             written,
             handler,
+        }
+    }
+
+    /// The routes a decorated class declares: the prefix its own decorator
+    /// carries, and the verb and path on each method's.
+    ///
+    /// Read from the arguments the way every other shape is, so Nest's
+    /// `@Controller('cats')` + `@Get(':id')`, a JAX-RS-style `@Path('/cats')`
+    /// and anything else written this way are one rule rather than three
+    /// tables. The verbs and paths of one method are crossed, never taken a
+    /// decorator at a time: `@Get()` and `@Path(':id')` on one method are one
+    /// route, and reading them apart would claim two.
+    fn class_routes(&mut self, class_key: &str, c: &ast::Class) {
+        let prefix = c
+            .decorators
+            .iter()
+            .find_map(|d| {
+                let (_, paths) = decorator_route(&d.expr, mounts(&d.expr));
+                paths.into_iter().next()
+            })
+            .unwrap_or_default();
+        for m in &c.body {
+            let ast::ClassMember::Method(method) = m else {
+                continue;
+            };
+            let Some(mname) = prop_name(&method.key) else {
+                continue;
+            };
+            let mut d = Decorated::default();
+            for dec in &method.function.decorators {
+                let (verb, paths) = decorator_route(&dec.expr, false);
+                if verb.is_none() && paths.is_empty() {
+                    continue;
+                }
+                if let Some(v) = verb
+                    && !d.verbs.contains(&v)
+                {
+                    d.verbs.push(v);
+                }
+                d.paths.extend(paths);
+                let line = self.line(dec.span);
+                d.line = if d.line == 0 { line } else { d.line.min(line) };
+            }
+            if d.verbs.is_empty() && d.paths.is_empty() {
+                continue;
+            }
+            // No path of its own means the class's: `@Get()` under
+            // `@Controller('cats')` serves `/cats`.
+            let own: Vec<&str> = if d.paths.is_empty() {
+                vec![""]
+            } else {
+                d.paths.iter().map(String::as_str).collect()
+            };
+            let verbs: Vec<Option<route::Verb>> = if d.verbs.is_empty() {
+                vec![None]
+            } else {
+                d.verbs.iter().copied().map(Some).collect()
+            };
+            let symbol = format!("{class_key}.{mname}");
+            for path in own {
+                let written = if path.is_empty() {
+                    prefix.clone()
+                } else {
+                    route::join(&prefix, path)
+                };
+                // Neither the method nor its class states a path: nothing is
+                // known, and a guess would be worse than the silence.
+                if written.is_empty() {
+                    continue;
+                }
+                for verb in &verbs {
+                    self.facts.routes.push(RouteSite {
+                        route: route::RouteRef {
+                            symbol: symbol.clone(),
+                            verb: *verb,
+                            written: written.clone(),
+                            line: d.line,
+                        },
+                        // A decorator hands the path to the method it is
+                        // written on, and that method is the handler.
+                        handler: Some(Handler::InPlace),
+                    });
+                }
+            }
         }
     }
 

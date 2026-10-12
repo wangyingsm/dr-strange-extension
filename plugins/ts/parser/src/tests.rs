@@ -1414,3 +1414,108 @@ fn a_decorated_file_is_parsed_not_dropped() {
     node(&a, "web/src/cats.controller.CatsController.constructor");
     assert_eq!(a.skipped, 0, "nothing was dropped");
 }
+
+// ---- the routes a decorator declares --------------------------------------
+
+/// Nest's own spellings: a mount path with no leading slash, a parameter
+/// segment written `:id`, a bare `@Get()` taking the class's path, and
+/// several paths on one decorator.
+#[test]
+fn a_decorated_class_declares_what_it_serves() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/cats.controller.ts",
+            r#"
+        import { Controller, Get, Post, Delete } from '@nestjs/common';
+
+        @Controller('cats')
+        export class CatsController {
+            @Get(':id') one(@Param('id') id: string) { return id; }
+            @Post() create() { return null; }
+            @Delete(':id') drop() { return null; }
+            @Get(['all', 'list']) many() { return []; }
+            @Roles('admin') helper() { return null; }
+        }
+        "#,
+        ),
+    ]));
+    let key = "web/src/cats.controller.CatsController";
+    assert_eq!(
+        serves(&a, &format!("{key}.one")),
+        vec!["GET /cats/{}".to_string()],
+        "`cats` and `:id` need no slash to be a path"
+    );
+    assert_eq!(
+        serves(&a, &format!("{key}.create")),
+        vec!["POST /cats".to_string()],
+        "no path of its own means the class's"
+    );
+    assert_eq!(
+        serves(&a, &format!("{key}.drop")),
+        vec!["DELETE /cats/{}".to_string()]
+    );
+    assert_eq!(
+        serves(&a, &format!("{key}.many")),
+        vec!["GET /cats/all".to_string(), "GET /cats/list".to_string()],
+        "a decorator may carry several paths"
+    );
+    assert!(
+        !node(&a, &format!("{key}.helper"))
+            .props
+            .contains_key("serves"),
+        "a decorator that names no verb and carries no path declares nothing"
+    );
+}
+
+/// A class-level path with a slash needs no name to be recognised, and the
+/// method's own written spelling is kept beside the comparable form.
+#[test]
+fn a_path_shaped_class_decorator_needs_no_name() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/bridge.ts",
+            r#"
+        @Path('/bridge')
+        export class Bridge {
+            @GET @Path('/check/{id}') check() { return ''; }
+        }
+        "#,
+        ),
+    ]));
+    let key = "web/src/bridge.Bridge.check";
+    assert_eq!(
+        serves(&a, key),
+        vec!["GET /bridge/check/{}".to_string()],
+        "two decorators on one method are one route"
+    );
+    assert_eq!(
+        node(&a, key).props["serves_as_written"]["$value"][0],
+        serde_json::json!("/bridge/check/{id}"),
+        "the source's own spelling, kept"
+    );
+}
+
+/// A decorated class that is nobody's controller declares nothing: the
+/// string an ORM or a DI container is given is just a string.
+#[test]
+fn a_decorator_that_is_not_a_routes_declares_nothing() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/cat.entity.ts",
+            r#"
+        @Entity('cats')
+        export class Cat {
+            @Column('varchar') name: string;
+            rename(to: string) { this.name = to; }
+        }
+        "#,
+        ),
+    ]));
+    assert!(
+        serves(&a, "web/src/cat.entity.Cat.rename").is_empty(),
+        "no verb and no path-shaped literal anywhere"
+    );
+}
