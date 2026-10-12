@@ -345,6 +345,40 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 }
             }
         };
+    /// The key of the in-tree callable a bare name in this file refers to:
+    /// declared here, or imported from a module this run parsed.
+    ///
+    /// Classes stay out — a class is not a function value in TypeScript, and
+    /// a name that resolves to one says nothing about who runs it.
+    fn callable_named(
+        ix: &Index,
+        f: &FileFacts,
+        bindings: &BTreeMap<&str, (&str, &str)>,
+        classes: &BTreeSet<String>,
+        name: &str,
+    ) -> Option<String> {
+        match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
+            Some((key, callable)) if *callable && !classes.contains(key) => Some(key.clone()),
+            _ => match bindings.get(name) {
+                Some((imported, spec)) if *imported != "*" => {
+                    match ix.resolve_spec(&f.file, spec) {
+                        Resolved::Module(target) => {
+                            let n = if *imported == "default" {
+                                "default"
+                            } else {
+                                imported
+                            };
+                            ix.lookup_export(&target, n, 0)
+                                .filter(|k| !classes.contains(k))
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            },
+        }
+    }
+
     fn file_bindings(f: &FileFacts) -> BTreeMap<&str, (&str, &str)> {
         f.bindings
             .iter()
@@ -764,26 +798,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         // REFERENCES edge. Classes stay out (not fn values in TS); silent
         // on a miss; never a self-loop.
         for (caller, line, name, scheduled) in &f.fn_refs {
-            let target = match ix.decls.get(&f.module_id).and_then(|d| d.get(name)) {
-                Some((key, callable)) if *callable && !classes.contains(key) => Some(key.clone()),
-                _ => match bindings.get(name.as_str()) {
-                    Some((imported, spec)) if *imported != "*" => {
-                        match ix.resolve_spec(&f.file, spec) {
-                            Resolved::Module(target) => {
-                                let n = if *imported == "default" {
-                                    "default"
-                                } else {
-                                    imported
-                                };
-                                ix.lookup_export(&target, n, 0)
-                                    .filter(|k| !classes.contains(k))
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                },
-            };
+            let target = callable_named(&ix, f, &bindings, &classes, name);
             if let Some(target) = target
                 && target != *caller
             {
