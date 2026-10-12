@@ -1151,3 +1151,126 @@ fn an_enhanced_for_variable_is_typed_by_its_declaration() {
     assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.A.handle"));
     assert!(has_edge(&a, "m.Fanout.all", "CALLS", "m.B.handle"));
 }
+
+// ---- the routes a call asks for -------------------------------------------
+
+/// The routes a method asks for, as the property records them.
+fn requests(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("requests")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every client spelling, and the one that matters most: a project-local
+/// wrapper that names no library this reader could have been taught.
+#[test]
+fn a_call_with_a_path_argument_asks_for_a_route() {
+    let a = run(vec![(
+        "Client.java",
+        r#"
+        package com.acme;
+        class Client {
+            void viaTemplate() { rest.getForObject("/api/orders/{id}", Order.class, 1); }
+            void viaExchange() { rest.exchange("/api/orders", HttpMethod.POST, body, Order.class); }
+            void viaWebClient() { web.get().uri("/api/orders"); }
+            void viaWrapper() { callBridge("/bridge/check/1"); }
+            void viaConcat(String id) { rest.getForObject("/api/orders/" + id, Order.class); }
+        }
+        "#,
+    )]);
+    assert_eq!(
+        requests(&a, "com.acme.Client.viaTemplate"),
+        vec!["GET /api/orders/{}".to_string()],
+        "a Spring path variable is the convention's own hole"
+    );
+    assert_eq!(
+        requests(&a, "com.acme.Client.viaExchange"),
+        vec!["POST /api/orders".to_string()],
+        "`exchange` hides the verb in an enum constant"
+    );
+    assert_eq!(
+        requests(&a, "com.acme.Client.viaWebClient"),
+        vec!["* /api/orders".to_string()],
+        "`uri` names no verb, and `*` is what that means"
+    );
+    assert_eq!(
+        requests(&a, "com.acme.Client.viaWrapper"),
+        vec!["* /bridge/check/1".to_string()],
+        "the wrapper is visible because the argument is"
+    );
+    assert!(
+        requests(&a, "com.acme.Client.viaConcat").is_empty(),
+        "a concatenation is not a literal and states nothing"
+    );
+}
+
+/// An absolute URL names the same route as the path inside it, and a query
+/// says nothing about which handler serves it.
+#[test]
+fn an_absolute_url_and_a_query_reduce_to_the_path() {
+    let a = run(vec![(
+        "Client.java",
+        r#"
+        package com.acme;
+        class Client {
+            void go() { rest.getForObject("https://api.example.com/v1/orders?page=2", Order.class); }
+        }
+        "#,
+    )]);
+    assert_eq!(
+        requests(&a, "com.acme.Client.go"),
+        vec!["GET /v1/orders".to_string()]
+    );
+}
+
+/// A string that is not path-shaped is not a route, and a method that asks
+/// for nothing carries no property at all.
+#[test]
+fn only_a_path_shaped_argument_counts() {
+    let a = run(vec![(
+        "Client.java",
+        r#"
+        package com.acme;
+        class Client {
+            void plain() { compute("orders", 2); }
+            void logs() { log.info("a b c"); }
+        }
+        "#,
+    )]);
+    assert!(requests(&a, "com.acme.Client.plain").is_empty());
+    assert!(requests(&a, "com.acme.Client.logs").is_empty());
+    assert!(
+        !node(&a, "com.acme.Client.plain")
+            .props
+            .contains_key("requests"),
+        "no property rather than an empty one"
+    );
+}
+
+/// The account says what was recorded, since a request is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_requests_are_counted_in_the_report() {
+    let a = run(vec![(
+        "Client.java",
+        r#"
+        package com.acme;
+        class Client {
+            void go() { rest.getForObject("/api/orders", Order.class); }
+        }
+        "#,
+    )]);
+    assert!(
+        a.notes.iter().any(|n| n.contains("route(s) asked for")),
+        "{:?}",
+        a.notes
+    );
+}

@@ -15,6 +15,7 @@ mod resolve;
 
 pub use resolve::{Assembled, assemble};
 
+use dr_strange_ext::route;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tree_sitter::Node as TsNode;
@@ -260,6 +261,10 @@ pub struct FileFacts {
     /// The dependencies this file's types take by injection.
     #[serde(default)]
     pub injections: Vec<Injection>,
+    /// The routes this file's methods ask for — a call argument shaped like
+    /// a path. Attached to the calling method in [`assemble`].
+    #[serde(default)]
+    pub requests: Vec<route::RouteRef>,
 }
 
 /// The extensions this plugin claims.
@@ -942,6 +947,62 @@ impl Walker<'_> {
             .unwrap_or_default()
     }
 
+    /// A call whose argument is shaped like a path is asking for a route —
+    /// whatever the method is named.
+    ///
+    /// Recognising the *argument* rather than a list of blessed clients is
+    /// what makes a project-local wrapper visible: `callBridge("/bridge/check")`
+    /// names no library this reader could have been taught. The cost is that
+    /// a classpath resource can slip through; it will match no declaration,
+    /// and the account says how many did.
+    fn route_ref(&mut self, caller: &str, node: TsNode) {
+        // `getForObject`, `postForEntity`, `delete`: the verb is in the name
+        // when the client puts it there. `exchange` and WebClient's `uri`
+        // put it nowhere, and `*` is what that means.
+        let mut verb = node
+            .child_by_field_name("name")
+            .and_then(|n| route::Verb::from_name(&self.text(n)));
+        let Some(args) = node.child_by_field_name("arguments") else {
+            return;
+        };
+        let mut written = None;
+        for arg in args.named_children(&mut args.walk()) {
+            if written.is_none() {
+                written = self.path_text(arg);
+            }
+            // `exchange(url, HttpMethod.POST, …)` states the verb as an enum
+            // constant, which is the one shape the method's name hides.
+            if verb.is_none() && arg.kind() == "field_access" {
+                let on = arg.child_by_field_name("object").map(|o| self.text(o));
+                let field = arg.child_by_field_name("field").map(|f| self.text(f));
+                if let (Some(on), Some(field)) = (on, field)
+                    && matches!(on.as_str(), "HttpMethod" | "RequestMethod")
+                {
+                    verb = route::Verb::from_name(&field);
+                }
+            }
+        }
+        let Some(written) = written else { return };
+        let line = self.line(node);
+        self.facts.requests.push(route::RouteRef {
+            symbol: caller.to_string(),
+            verb,
+            written,
+            line,
+        });
+    }
+
+    /// The path a literal argument states, if it states one. A concatenation
+    /// is not a literal and states nothing a parser is certain of.
+    fn path_text(&self, node: TsNode) -> Option<String> {
+        if node.kind() != "string_literal" {
+            return None;
+        }
+        let text = self.text(node);
+        let inner = text.strip_prefix('"')?.strip_suffix('"')?;
+        route::looks_like_path(inner).then(|| inner.to_string())
+    }
+
     /// Records every call a body makes.
     fn collect_calls(&mut self, caller: &str, type_key: &str, type_name: &str, body: TsNode) {
         let mut stack = vec![body];
@@ -949,6 +1010,7 @@ impl Walker<'_> {
             match node.kind() {
                 "method_invocation" => {
                     let line = self.line(node);
+                    self.route_ref(caller, node);
                     let name = node
                         .child_by_field_name("name")
                         .map(|n| self.text(n))
