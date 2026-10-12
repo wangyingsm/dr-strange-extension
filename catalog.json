@@ -31,10 +31,10 @@
     },
     {
       "name": "py",
-      "version": "2.0.1",
+      "version": "2.1.0",
       "claims": ".py .pyi .pyw",
-      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/py-v2.0.1/py.wasm",
-      "sha256": "26f487330c59736e6be4532d90ee974dfa9ad5e2c99902f4b309dffd7085a849",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/py-v2.1.0/py.wasm",
+      "sha256": "a60536b6e6f37e8b30c2c37fc7465c5bd975a4f38c95a436c27e1874ab41f238",
       "contract": "1.0.0",
       "min_drsg": "2.0.0"
     },
