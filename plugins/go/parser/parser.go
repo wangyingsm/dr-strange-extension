@@ -250,10 +250,28 @@ type FileFacts struct {
 	// Call sites too dynamic to name at all — `f()()`, chained selectors —
 	// counted so the notes can account for them.
 	Opaque int `json:"opaque,omitempty"`
-	// Requests are the routes this file's functions ask for — a call
-	// argument shaped like a path. Attached to the calling function in
-	// [Assemble].
-	Requests []route.Ref `json:"requests,omitempty"`
+	// Routes are the routes this file's calls state, each with the evidence
+	// for which side of the convention it is on. Split in [Assemble].
+	Routes []RouteSite `json:"routes,omitempty"`
+}
+
+// RouteSite is one route a call states, and what the call did with it.
+//
+// `http.HandleFunc("/x", h)` and `http.Get("/x")` are the same shape — a path
+// in an argument — and what tells a declaration from a request is whether the
+// path was handed to a handler: a registration hands it to someone, a client
+// call does not.
+type RouteSite struct {
+	// Route is the route as written, on the function the call sits in.
+	Route route.Ref `json:"route"`
+	// InPlace is true when a func literal was written into the call. A
+	// struct or a string never is, which is what keeps `http.Get("/x")` a
+	// request.
+	InPlace bool `json:"in_place,omitempty"`
+	// Named is a handler named by an identifier or a selector, resolved in
+	// [Assemble]: a declaration only when the name turns out to be a
+	// function this tree declares.
+	Named string `json:"named,omitempty"`
 }
 
 // ParseChunk parses one chunk of paths into per-file facts.
@@ -836,8 +854,9 @@ func (w *walker) routeRef(caller string, call *ast.CallExpr) {
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" {
 		return
 	}
-	// `http.Get(url)`, `client.Post(…)`: the verb is in the name when the
-	// client puts it there. `Do` and `ServeHTTP` put it nowhere.
+	// `http.Get(url)`, `r.GET("/x", h)`, `client.Post(…)`: the verb is in the
+	// name when the framework puts it there. `HandleFunc` and `Do` put it
+	// nowhere, and `*` is what that means.
 	verb := route.Any
 	switch fn := call.Fun.(type) {
 	case *ast.Ident:
@@ -849,16 +868,30 @@ func (w *walker) routeRef(caller string, call *ast.CallExpr) {
 			verb = v
 		}
 	}
-	written := ""
+	written, inPlace, named := "", false, ""
 	for _, arg := range call.Args {
 		if written == "" {
-			written = w.pathText(arg)
+			if v, path, ok := pattern(w.literal(arg)); ok {
+				written = path
+				if v != route.Any {
+					verb = v
+				}
+			}
 		}
-		// `http.NewRequest("POST", url, body)` states the verb positionally,
-		// which is the one shape the callee's name hides.
-		if verb == route.Any {
-			if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-				if text, err := strconv.Unquote(lit.Value); err == nil && isAlpha(text) {
+		switch a := arg.(type) {
+		case *ast.FuncLit:
+			inPlace = true
+		case *ast.Ident:
+			named = a.Name
+		case *ast.SelectorExpr:
+			if x, ok := a.X.(*ast.Ident); ok {
+				named = x.Name + "." + a.Sel.Name
+			}
+		case *ast.BasicLit:
+			// `http.NewRequest("POST", url, body)` states the verb
+			// positionally, which is the one shape the callee's name hides.
+			if verb == route.Any && a.Kind == token.STRING {
+				if text, err := strconv.Unquote(a.Value); err == nil && isAlpha(text) {
 					if v, ok := route.FromName(text); ok {
 						verb = v
 					}
@@ -869,22 +902,25 @@ func (w *walker) routeRef(caller string, call *ast.CallExpr) {
 	if written == "" {
 		return
 	}
-	w.facts.Requests = append(w.facts.Requests, route.Ref{
-		Symbol:  caller,
-		Verb:    verb,
-		Written: written,
-		Line:    uint64(w.line(call)),
+	w.facts.Routes = append(w.facts.Routes, RouteSite{
+		Route: route.Ref{
+			Symbol:  caller,
+			Verb:    verb,
+			Written: written,
+			Line:    uint64(w.line(call)),
+		},
+		InPlace: inPlace,
+		Named:   named,
 	})
 }
 
-// pathText is the path an expression states, if it states one: a string
+// literal is the text an expression states, if it states any: a string
 // literal, or a `fmt.Sprintf` whose verbs stand where a variable segment
 // does.
 //
 // A path assembled by `+` or `path.Join` is not a literal and states nothing
 // a parser is certain of.
-func (w *walker) pathText(e ast.Expr) string {
-	var text string
+func (w *walker) literal(e ast.Expr) string {
 	switch x := e.(type) {
 	case *ast.BasicLit:
 		if x.Kind != token.STRING {
@@ -894,26 +930,41 @@ func (w *walker) pathText(e ast.Expr) string {
 		if err != nil {
 			return ""
 		}
-		text = unquoted
+		return unquoted
 	case *ast.CallExpr:
 		sel, ok := x.Fun.(*ast.SelectorExpr)
 		if !ok || sel.Sel.Name != "Sprintf" || len(x.Args) == 0 {
 			return ""
 		}
-		format := w.pathText(x.Args[0])
+		format := w.literal(x.Args[0])
 		if format == "" {
 			return ""
 		}
-		text = holes(format)
+		return holes(format)
 	case *ast.ParenExpr:
-		return w.pathText(x.X)
+		return w.literal(x.X)
 	default:
 		return ""
 	}
-	if !route.LooksLikePath(text) {
-		return ""
+}
+
+// pattern reads one literal as a route pattern: the path, and the verb when
+// the string carries one.
+//
+// Go 1.22's own router states both in one string —
+// `mux.HandleFunc("GET /orders/{id}", h)` — which is the only place a path
+// and a method are written together, and it is why the verb is read here
+// rather than from the callee's name alone.
+func pattern(text string) (route.Verb, string, bool) {
+	if head, rest, found := strings.Cut(text, " "); found {
+		if v, ok := route.FromName(head); ok && isAlpha(head) && route.LooksLikePath(rest) {
+			return v, rest, true
+		}
 	}
-	return text
+	if !route.LooksLikePath(text) {
+		return route.Any, "", false
+	}
+	return route.Any, text, true
 }
 
 // holes rewrites a `fmt` format string's verbs as the convention's own hole,

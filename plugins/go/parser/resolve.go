@@ -825,30 +825,65 @@ func Assemble(all []FileFacts) Assembled {
 		})
 	}
 
-	// ---- the routes each function asks for --------------------------------
-	// On the function that makes the call, not a node of their own: a request
-	// and the declaration that serves it are matched when someone asks, and
-	// an edge drawn here would freeze a guess about which handler that is.
-	// Last, because a node written after this point would never be asked.
-	var refs []route.Ref
-	for _, f := range all {
-		refs = append(refs, f.Requests...)
+	// ---- the two halves, written on the symbols that state them -----------
+	// Which side a call is on is decided here and nowhere earlier: a handler
+	// is a function this tree declares, not any name a call mentions, and
+	// that is what tells `http.HandleFunc("/x", h)` from `http.Get("/x")` —
+	// otherwise the same shape. Never a node or an edge of their own: a
+	// request and the declaration that serves it are matched when someone
+	// asks, and an edge drawn here would freeze a guess about which handler
+	// that is. Last, because a node written after this point is never asked.
+	fn := func(key string) bool {
+		at, ok := seen[key]
+		return ok && (out.Nodes[at].Label == "Function" || out.Nodes[at].Label == "Method")
 	}
-	asked := route.Of(route.Requests, refs)
-	recorded := 0
+	var asked, served []route.Ref
+	for _, f := range all {
+		aliases := map[string]string{}
+		for _, imp := range f.Imports {
+			name := imp.Alias
+			if name == "" {
+				name = path.Base(imp.Path)
+			}
+			aliases[name] = imp.Path
+		}
+		for _, site := range f.Routes {
+			switch handler := routeHandler(f, aliases, site, fn); {
+			case handler != "":
+				r := site.Route
+				r.Symbol = handler
+				served = append(served, r)
+			case site.InPlace:
+				// Written in place, so the function that registered it is
+				// the only symbol there is.
+				served = append(served, site.Route)
+			default:
+				// Nothing was handed anywhere: the call is asking.
+				asked = append(asked, site.Route)
+			}
+		}
+	}
+	requests := route.Of(route.Requests, asked)
+	declares := route.Of(route.Serves, served)
+	askedCount, servedCount := 0, 0
 	for at := range out.Nodes {
 		props := out.Nodes[at].Props
 		if props == nil {
 			props = Props{}
 		}
-		n := asked.Write(out.Nodes[at].Key, props)
-		if n == 0 {
+		n := requests.Write(out.Nodes[at].Key, props)
+		d := declares.Write(out.Nodes[at].Key, props)
+		if n+d == 0 {
 			continue
 		}
-		recorded += n
+		askedCount += n
+		servedCount += d
 		out.Nodes[at].Props = props
 	}
-	if note := asked.Note(recorded); note != "" {
+	if note := declares.Note(servedCount); note != "" {
+		out.Notes = append(out.Notes, note)
+	}
+	if note := requests.Note(askedCount); note != "" {
 		out.Notes = append(out.Notes, note)
 	}
 
@@ -882,6 +917,32 @@ func Assemble(all []FileFacts) Assembled {
 			"%d interface(s) left unmatched: an embedded interface is not declared in this tree", unmatchedIfaces))
 	}
 	return out
+}
+
+// routeHandler is the key of the function a registration handed its path to,
+// empty when it handed it to nothing this tree declares.
+//
+// A bare name belongs to the file's own package; a selector names an import,
+// and `views.One` is the package `views` resolves to plus `One`. A method
+// value on a receiver (`s.handle`) is not followed — which receiver that is
+// depends on which `s`, and answering it wrong would name the wrong handler.
+func routeHandler(f FileFacts, aliases map[string]string, site RouteSite, fn func(string) bool) string {
+	if site.Named == "" {
+		return ""
+	}
+	pkg, name, qualified := strings.Cut(site.Named, ".")
+	if !qualified {
+		if key := f.PkgPath + "." + site.Named; fn(key) {
+			return key
+		}
+		return ""
+	}
+	if target, ok := aliases[pkg]; ok {
+		if key := target + "." + name; fn(key) {
+			return key
+		}
+	}
+	return ""
 }
 
 // satisfy decides which declared types implement which declared interfaces.

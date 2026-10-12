@@ -1357,3 +1357,103 @@ func TestTheRequestsAreCountedInTheReport(t *testing.T) {
 	}
 	t.Errorf("no account of the routes recorded in %v", a.Notes)
 }
+
+// ---- the routes a registration call declares ------------------------------
+
+// serves reads the routes a symbol declares, as the property records them.
+func serves(t *testing.T, a Assembled, key string) []string {
+	t.Helper()
+	p, ok := node(t, a, key).Props["serves"]
+	if !ok {
+		return nil
+	}
+	return p.(map[string]any)["$value"].([]string)
+}
+
+// A registration hands its path to a handler, and that handler is what
+// serves it — net/http, Go 1.22's own pattern, and gin, read as one rule.
+func TestARegistrationNamesTheHandlerThatServesIt(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"handlers/h.go": `package handlers
+
+import "net/http"
+
+func ListOrders(w http.ResponseWriter, r *http.Request) {}
+`,
+		"main.go": `package m
+
+import (
+	"net/http"
+
+	"m/handlers"
+)
+
+func listCarts(w http.ResponseWriter, r *http.Request) {}
+
+func main() {
+	http.HandleFunc("/api/orders", handlers.ListOrders)
+	http.HandleFunc("/api/carts", listCarts)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/orders/{id}", func(w http.ResponseWriter, r *http.Request) {})
+	r.GET("/api/gin/:id", listCarts)
+	http.Get("/api/elsewhere")
+}
+`,
+	}})
+	for _, c := range []struct {
+		key  string
+		want []string
+		why  string
+	}{
+		{"m/handlers.ListOrders", []string{"* /api/orders"}, "an imported handler is named, not the function that registered it"},
+		{"m.listCarts", []string{"* /api/carts", "GET /api/gin/{}"}, "a handler registered twice serves both, and gin's name carries the verb"},
+		{"m.main", []string{"GET /api/orders/{}"}, "Go 1.22 states the verb inside the pattern; a func literal has no name, so main holds it"},
+	} {
+		got := serves(t, a, c.key)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s serves %v, want %v — %s", c.key, got, c.want, c.why)
+		}
+	}
+	// A client call hands its path to nobody and stays a request.
+	if got := requests(t, a, "m.main"); !reflect.DeepEqual(got, []string{"GET /api/elsewhere"}) {
+		t.Errorf("main asks for %v", got)
+	}
+}
+
+// A name that is no function of this tree hands the path to nothing, which is
+// what keeps a client call with a config argument a request.
+func TestANameThatIsNoFunctionIsNoHandler(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"c.go": `package m
+
+var client = 1
+
+func fetch() {
+	post("/api/orders", client)
+}
+`,
+	}})
+	if got := requests(t, a, "m.fetch"); !reflect.DeepEqual(got, []string{"POST /api/orders"}) {
+		t.Errorf("fetch asks for %v", got)
+	}
+	if got := serves(t, a, "m.fetch"); got != nil {
+		t.Errorf("fetch serves %v", got)
+	}
+}
+
+// The account says what was declared, since a declaration is only half of a
+// route and the other half is matched later.
+func TestTheDeclarationsAreCountedInTheReport(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod":  "module m\n",
+		"main.go": "package m\n\nfunc main() { http.HandleFunc(\"/api/orders\", func() {}) }\n",
+	}})
+	for _, n := range a.Notes {
+		if strings.Contains(n, "declared by a handler") {
+			return
+		}
+	}
+	t.Errorf("no account of the routes declared in %v", a.Notes)
+}
