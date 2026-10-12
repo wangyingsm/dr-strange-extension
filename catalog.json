@@ -40,10 +40,10 @@
     },
     {
       "name": "java",
-      "version": "2.1.0",
+      "version": "2.2.0",
       "claims": ".java",
-      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/java-v2.1.0/java.wasm",
-      "sha256": "8a3a9e7acc234ab09e462e80c2f73ea693998a6077a67b69610da49e0532a8a9",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/java-v2.2.0/java.wasm",
+      "sha256": "90cc363dd84884839543395e309a43e00cfbab93c204e00e24f4c2f3957290a5",
       "contract": "1.0.0",
       "min_drsg": "2.0.0"
     },
