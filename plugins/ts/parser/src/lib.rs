@@ -255,6 +255,22 @@ pub struct FileFacts {
     /// [`assemble`], where a client imported from another module resolves too.
     #[serde(default)]
     pub bases: Vec<(String, Base)>,
+    /// Every router this file mounts under a path: `app.use('/api', router)`.
+    /// The routes were hung on that router in whichever module declared it,
+    /// so the two are joined in [`assemble`].
+    #[serde(default)]
+    pub mounts: Vec<Mount>,
+}
+
+/// One router mounted under a path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mount {
+    pub prefix: String,
+    /// The router being mounted, as written.
+    pub mounted: String,
+    /// The router it is mounted on, as written — which may itself be mounted
+    /// somewhere, so a router under a router is under both.
+    pub under: Option<String>,
 }
 
 /// The base path a client was built with, as the source states it.
@@ -2119,7 +2135,7 @@ impl Walker<'_> {
     /// names no library this reader could have been taught. The cost is that
     /// a router push or a file path can slip through; it will match nothing
     /// on the other side, and the account says how many did.
-    fn stated(&self, node: &ast::CallExpr) -> Stated {
+    fn stated(&mut self, node: &ast::CallExpr) -> Stated {
         let ast::Callee::Expr(callee) = &node.callee else {
             return Stated {
                 verb: None,
@@ -2137,6 +2153,28 @@ impl Walker<'_> {
             _ => None,
         };
         if named.as_deref().is_some_and(route::mounts) {
+            // The prefix is this call's, and the routes under it were hung on
+            // the router it names — in whichever module declared that router,
+            // so the two halves are joined at assemble.
+            let prefix = node.args.iter().find_map(|a| path_text(&a.expr));
+            let mounted = node.args.iter().rev().find_map(|a| match &*a.expr {
+                ast::Expr::Ident(i) => Some(i.sym.to_string()),
+                _ => None,
+            });
+            if let (Some(prefix), Some(mounted)) = (prefix, mounted) {
+                let under = match &**callee {
+                    ast::Expr::Member(m) => match &*m.obj {
+                        ast::Expr::Ident(i) => Some(i.sym.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                self.facts.mounts.push(Mount {
+                    prefix,
+                    mounted,
+                    under,
+                });
+            }
             return Stated {
                 verb: None,
                 written: None,

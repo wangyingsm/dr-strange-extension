@@ -979,10 +979,64 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // The prefix a mounted router carries, by the key of the router itself:
+    // `app.use('/api', router)` says every route hung on that router is under
+    // `/api`, and the hanging happened in whichever module declared it.
+    //
+    // Resolved to a key rather than a name because the two calls are in
+    // different files, and iterated because a router mounted under a router
+    // is under both.
+    //
+    // Each pair is `(the mounted router's key, its prefix, the key it is
+    // mounted on)`.
+    let mut pairs: Vec<(String, String, Option<String>)> = Vec::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for m in &f.mounts {
+            let Some(key) = callable_named(&ix, f, &bindings, &classes, &m.mounted) else {
+                continue;
+            };
+            let under = m
+                .under
+                .as_deref()
+                .and_then(|name| callable_named(&ix, f, &bindings, &classes, name));
+            pairs.push((key, m.prefix.clone(), under));
+        }
+    }
+    let mut mounted: BTreeMap<String, String> = BTreeMap::new();
+    for (key, prefix, _) in &pairs {
+        mounted.insert(key.clone(), prefix.clone());
+    }
+    // A router mounted on a router is under both, and the two mounts may be
+    // read in either order. Bounded rather than recursive: four levels of
+    // nesting is already more than any router tree carries, and a cycle must
+    // not hang a parse.
+    for _ in 0..4 {
+        let mut grew = false;
+        for (key, prefix, under) in &pairs {
+            let Some(outer) = under.as_deref().and_then(|u| mounted.get(u)).cloned() else {
+                continue;
+            };
+            let joined = route::join(&outer, prefix);
+            if mounted.get(key) != Some(&joined) {
+                mounted.insert(key.clone(), joined);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     let mut asked_refs: Vec<route::RouteRef> = Vec::new();
     let mut served_refs: Vec<route::RouteRef> = Vec::new();
     for f in &all {
         let bindings = file_bindings(f);
+        // The prefix the router a route was hung on carries, when it was
+        // mounted under one.
+        let mounted_under = |name: &str| -> Option<&String> {
+            let key = callable_named(&ix, f, &bindings, &classes, name)?;
+            mounted.get(&key)
+        };
         // The base a receiver carries: built in this module, or imported from
         // the one that built it.
         let base_of = |name: &str| -> Option<&str> {
@@ -1013,8 +1067,15 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             // comparable form is the join — and the written form too, since
             // together they are what the source says.
             let mut stated = site.route.clone();
-            if let Some(base) = site.receiver.as_deref().and_then(base_of) {
-                stated.written = route::join(base, &stated.written);
+            if let Some(receiver) = site.receiver.as_deref() {
+                // A client states its base where it was built; a router
+                // states its prefix where it was mounted. One receiver, two
+                // places the prefix can come from, and never both.
+                if let Some(base) = base_of(receiver) {
+                    stated.written = route::join(base, &stated.written);
+                } else if let Some(prefix) = mounted_under(receiver) {
+                    stated.written = route::join(prefix, &stated.written);
+                }
             }
             match handler {
                 Some(symbol) => served_refs.push(route::RouteRef { symbol, ..stated }),

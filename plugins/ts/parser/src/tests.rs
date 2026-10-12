@@ -1624,3 +1624,103 @@ fn a_projects_own_client_wrapper_states_a_base_too() {
         vec!["GET /bridge/check/{}".to_string()]
     );
 }
+
+// ---- a mounted router's prefix --------------------------------------------
+
+/// A router carries its routes in one file and is given its prefix in
+/// another, which is how every Express app of any size is laid out.
+#[test]
+fn a_mounted_routers_prefix_reaches_its_routes() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/routes/orders.ts",
+            r#"
+        import { Router } from 'express';
+        export function one(req: any, res: any) { res.send(); }
+        export function create(req: any, res: any) { res.send(); }
+        export const router = Router();
+        router.get('/:id', one);
+        router.post('/', create);
+        "#,
+        ),
+        (
+            "src/app.ts",
+            r#"
+        import express from 'express';
+        import { router } from './routes/orders';
+        const app = express();
+        app.use('/api/orders', router);
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/routes/orders.one"),
+        vec!["GET /api/orders/{}".to_string()],
+        "the prefix crossed the file that mounted it"
+    );
+    assert_eq!(
+        serves(&a, "web/src/routes/orders.create"),
+        vec!["POST /api/orders".to_string()],
+        "a bare `/` adds nothing to the prefix"
+    );
+}
+
+/// A router mounted on a router is under both, and the two mounts may be
+/// read in either file order.
+#[test]
+fn a_router_under_a_router_is_under_both() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/orders.ts",
+            r#"
+        export function one(req: any, res: any) { res.send(); }
+        export const orders = Router();
+        orders.get('/:id', one);
+        "#,
+        ),
+        (
+            "src/api.ts",
+            r#"
+        import { orders } from './orders';
+        export const api = Router();
+        api.use('/orders', orders);
+        "#,
+        ),
+        (
+            "src/app.ts",
+            r#"
+        import { api } from './api';
+        const app = express();
+        app.use('/api/v1', api);
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/orders.one"),
+        vec!["GET /api/v1/orders/{}".to_string()],
+        "two mounts, two files, one path"
+    );
+}
+
+/// A router nothing mounts states its paths as written, rather than taking a
+/// prefix from somewhere it was never given one.
+#[test]
+fn an_unmounted_router_states_its_paths_whole() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/standalone.ts",
+            r#"
+        export function ping(req: any, res: any) { res.send(); }
+        export const router = Router();
+        router.get('/ping', ping);
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/standalone.ping"),
+        vec!["GET /ping".to_string()]
+    );
+}
