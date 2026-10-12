@@ -153,6 +153,66 @@ fn named_arg(args: &str) -> Option<String> {
     })
 }
 
+/// Every path-shaped string literal an annotation's arguments hold.
+///
+/// Read from the argument rather than from a table of annotation names, the
+/// way a request is read from a call's: `"/x"`, `value = "/x"`, `path = "/x"`
+/// and `{"/a", "/b"}` are one rule, and a framework nobody listed declares
+/// its routes here too. A `produces = "application/json"` is not path-shaped
+/// and says nothing.
+fn anno_paths(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = args;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        let text = &after[..end];
+        if route::looks_like_path(text) {
+            out.push(text.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The verbs an annotation states: the one its own name carries, plus any
+/// named as an enum constant in its arguments.
+///
+/// `@RequestMapping(method = RequestMethod.POST)` is the one shape where the
+/// annotation's name does not say the verb, and a decade of Spring code
+/// writes routes that way.
+fn anno_verbs(written: &str, args: Option<&str>) -> Vec<route::Verb> {
+    let mut out = Vec::new();
+    if let Some(v) = route::Verb::from_name(simple(written)) {
+        out.push(v);
+    }
+    for enum_name in ["RequestMethod.", "HttpMethod."] {
+        let mut rest = args.unwrap_or_default();
+        while let Some(at) = rest.find(enum_name) {
+            rest = &rest[at + enum_name.len()..];
+            let word: String = rest.chars().take_while(char::is_ascii_alphabetic).collect();
+            if let Some(v) = route::Verb::from_name(&word)
+                && !out.contains(&v)
+            {
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+/// What one method's annotations declare, before the class prefix applies.
+///
+/// Crossed rather than taken one annotation at a time: JAX-RS writes `@GET`
+/// and `@Path("/{id}")` as two annotations and one route, and reading them
+/// separately would claim two.
+#[derive(Default)]
+struct Declared {
+    verbs: Vec<route::Verb>,
+    paths: BTreeSet<String>,
+    line: u64,
+}
+
 struct Index {
     /// Every type this run parsed, by qualified name.
     types: BTreeMap<String, TypeEntry>,
@@ -494,15 +554,100 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         }
     }
 
-    // ---- the routes each method asks for ----------------------------------
-    // On the method that makes the call, not a node of their own: a request
-    // and the declaration that serves it are matched when someone asks, and
-    // an edge drawn here would freeze a guess about which handler that is.
+    // ---- the routes each handler declares ---------------------------------
+    // Shape 1: an annotation carrying a path. A class-level annotation's path
+    // is the prefix every method under it hangs off — Spring's
+    // `@RequestMapping` on the controller, JAX-RS's `@Path`, Micronaut's
+    // `@Controller` — which is why the two are read in one pass.
+    let mut prefixes: BTreeMap<&str, String> = BTreeMap::new();
+    let mut declared: BTreeMap<&str, Declared> = BTreeMap::new();
+    for f in &all {
+        for c in &f.clauses {
+            if c.ty != "ANNOTATED_BY" {
+                continue;
+            }
+            let paths = anno_paths(c.args.as_deref().unwrap_or_default());
+            if ix.types.contains_key(&c.src) {
+                if let Some(first) = paths.into_iter().next() {
+                    prefixes.entry(c.src.as_str()).or_insert(first);
+                }
+                continue;
+            }
+            let verbs = anno_verbs(&c.written, c.args.as_deref());
+            if verbs.is_empty() && paths.is_empty() {
+                continue;
+            }
+            let d = declared.entry(c.src.as_str()).or_default();
+            for v in verbs {
+                if !d.verbs.contains(&v) {
+                    d.verbs.push(v);
+                }
+            }
+            d.paths.extend(paths);
+            d.line = if d.line == 0 {
+                c.line
+            } else {
+                d.line.min(c.line)
+            };
+        }
+    }
+    let mut serves: Vec<route::RouteRef> = Vec::new();
+    for (method, d) in &declared {
+        let owner = method.rsplit_once('.').map(|(t, _)| t).unwrap_or_default();
+        // An interface method has no body and serves nothing: a Feign or
+        // `@HttpExchange` client declares a route it *asks for*, which is the
+        // other half of the convention and a slice of its own.
+        if ix.types.get(owner).map(|e| e.kind.as_str()) == Some("Interface") {
+            continue;
+        }
+        let prefix = prefixes.get(owner).map(String::as_str).unwrap_or_default();
+        // No path of its own means the class's: `@GetMapping` under
+        // `@RequestMapping("/api")` serves `/api`.
+        let own: Vec<&str> = if d.paths.is_empty() {
+            vec![""]
+        } else {
+            d.paths.iter().map(String::as_str).collect()
+        };
+        let verbs: Vec<Option<route::Verb>> = if d.verbs.is_empty() {
+            vec![None]
+        } else {
+            d.verbs.iter().copied().map(Some).collect()
+        };
+        for path in own {
+            let written = if path.is_empty() {
+                prefix.to_string()
+            } else {
+                route::join(prefix, path)
+            };
+            // Neither the method nor its class states a path: nothing is
+            // known, and a guess would be worse than the silence.
+            if written.is_empty() {
+                continue;
+            }
+            for verb in &verbs {
+                serves.push(route::RouteRef {
+                    symbol: (*method).to_string(),
+                    verb: *verb,
+                    written: written.clone(),
+                    line: d.line,
+                });
+            }
+        }
+    }
+
+    // ---- the two halves, written on the symbols that state them -----------
+    // Never a node or an edge of their own: a request and the declaration
+    // that serves it are matched when someone asks, and an edge drawn here
+    // would freeze a guess about which handler that is.
     let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
+    let served = route::Routes::of(route::Side::Serves, &serves);
     let mut recorded = 0usize;
+    let mut declares = 0usize;
     for node in &mut out.nodes {
         recorded += asked.write(&node.key, &mut node.props);
+        declares += served.write(&node.key, &mut node.props);
     }
+    out.notes.extend(served.note(declares));
     out.notes.extend(asked.note(recorded));
 
     let mut edge_set: BTreeSet<(String, String, String)> = BTreeSet::new();

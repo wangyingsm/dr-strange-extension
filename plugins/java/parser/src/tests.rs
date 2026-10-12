@@ -1274,3 +1274,182 @@ fn the_requests_are_counted_in_the_report() {
         a.notes
     );
 }
+
+// ---- the routes a handler declares ----------------------------------------
+
+/// The routes a handler serves, as the property records them.
+fn serves(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("serves")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Spring, in every spelling a decade of it uses: the class prefix, the
+/// shorthand annotations, the older `method =` form, and several paths at
+/// once.
+#[test]
+fn a_spring_controller_declares_what_it_serves() {
+    let a = run(vec![(
+        "Orders.java",
+        r#"
+        package com.acme;
+        @RestController
+        @RequestMapping("/api/orders")
+        class Orders {
+            @GetMapping("/{id}") Order one(@PathVariable Long id) { return null; }
+            @PostMapping Order create() { return null; }
+            @RequestMapping(value = "/{id}", method = RequestMethod.DELETE) void drop() {}
+            @GetMapping({"/all", "/list"}) List<Order> many() { return null; }
+            @Transactional void helper() {}
+        }
+        "#,
+    )]);
+    assert_eq!(
+        serves(&a, "com.acme.Orders.one"),
+        vec!["GET /api/orders/{}".to_string()],
+        "the class prefix and the method path are one route"
+    );
+    assert_eq!(
+        serves(&a, "com.acme.Orders.create"),
+        vec!["POST /api/orders".to_string()],
+        "no path of its own means the class's"
+    );
+    assert_eq!(
+        serves(&a, "com.acme.Orders.drop"),
+        vec!["DELETE /api/orders/{}".to_string()],
+        "the older `method =` form states the verb as an enum constant"
+    );
+    assert_eq!(
+        serves(&a, "com.acme.Orders.many"),
+        vec![
+            "GET /api/orders/all".to_string(),
+            "GET /api/orders/list".to_string()
+        ],
+        "an annotation may carry several paths"
+    );
+    assert!(
+        !node(&a, "com.acme.Orders.helper")
+            .props
+            .contains_key("serves"),
+        "an annotation that carries no path declares no route"
+    );
+}
+
+/// JAX-RS splits the verb and the path across two annotations, and they are
+/// one route — read in the same pass as Spring's, with no table naming
+/// either framework.
+#[test]
+fn jax_rs_and_micronaut_declare_the_same_way() {
+    let a = run(vec![
+        (
+            "Jax.java",
+            r#"
+            package com.acme;
+            @Path("/api/orders")
+            class Jax {
+                @GET @Path("/{id}") Order one() { return null; }
+                @DELETE void drop() {}
+            }
+            "#,
+        ),
+        (
+            "Micro.java",
+            r#"
+            package com.acme;
+            @Controller("/api/carts")
+            class Micro {
+                @Get("/{id}") Cart one() { return null; }
+            }
+            "#,
+        ),
+    ]);
+    assert_eq!(
+        serves(&a, "com.acme.Jax.one"),
+        vec!["GET /api/orders/{}".to_string()],
+        "`@GET` and `@Path` are two annotations and one route"
+    );
+    assert_eq!(
+        serves(&a, "com.acme.Jax.drop"),
+        vec!["DELETE /api/orders".to_string()]
+    );
+    assert_eq!(
+        serves(&a, "com.acme.Micro.one"),
+        vec!["GET /api/carts/{}".to_string()]
+    );
+}
+
+/// A declaration keeps the source's own spelling beside the comparable form,
+/// and a bare `@RequestMapping` names no verb — `*`, which matches every one.
+#[test]
+fn a_declaration_without_a_verb_matches_them_all() {
+    let a = run(vec![(
+        "Bridge.java",
+        r#"
+        package com.acme;
+        @RequestMapping("/bridge")
+        class Bridge {
+            @RequestMapping("/check/{id}") String check() { return ""; }
+        }
+        "#,
+    )]);
+    assert_eq!(
+        serves(&a, "com.acme.Bridge.check"),
+        vec!["* /bridge/check/{}".to_string()]
+    );
+    assert_eq!(
+        node(&a, "com.acme.Bridge.check").props["serves_as_written"]["$value"][0],
+        serde_json::json!("/bridge/check/{id}"),
+        "Spring's own spelling, kept"
+    );
+}
+
+/// An interface method has no body and serves nothing: a declarative client
+/// states a route it asks for, and claiming it serves one would make `wire`
+/// name the wrong side.
+#[test]
+fn a_declarative_client_interface_serves_nothing() {
+    let a = run(vec![(
+        "OrdersClient.java",
+        r#"
+        package com.acme;
+        @HttpExchange("/api/orders")
+        interface OrdersClient {
+            @GetExchange("/{id}") Order one(Long id);
+        }
+        "#,
+    )]);
+    assert!(
+        !node(&a, "com.acme.OrdersClient.one")
+            .props
+            .contains_key("serves"),
+        "an interface declares no handler"
+    );
+}
+
+/// The account says what was declared, since a declaration is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_declarations_are_counted_in_the_report() {
+    let a = run(vec![(
+        "Orders.java",
+        r#"
+        package com.acme;
+        class Orders {
+            @GetMapping("/api/orders") List<Order> all() { return null; }
+        }
+        "#,
+    )]);
+    assert!(
+        a.notes.iter().any(|n| n.contains("declared by a handler")),
+        "{:?}",
+        a.notes
+    );
+}
