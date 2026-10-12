@@ -20,6 +20,7 @@ mod resolve;
 
 pub use resolve::{Assembled, assemble};
 
+use dr_strange_ext::route;
 use ruff_python_ast as ast;
 use ruff_source_file::LineIndex;
 use ruff_text_size::{Ranged, TextRange};
@@ -242,6 +243,10 @@ pub struct FileFacts {
     /// The type positions this file's declarations write down.
     #[serde(default)]
     pub type_refs: Vec<TypeRef>,
+    /// The routes this file's functions ask for — a call argument shaped like
+    /// a path. Attached to the calling function in [`assemble`].
+    #[serde(default)]
+    pub requests: Vec<route::RouteRef>,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -1313,6 +1318,41 @@ fn docstring(body: &[ast::Stmt]) -> Option<String> {
     (!cleaned.is_empty()).then_some(cleaned)
 }
 
+/// The path an expression states, if it states one: a string literal, or an
+/// f-string whose holes are left as `${}` for the convention to reduce.
+///
+/// An f-string is the common way a path carries an id —
+/// `f"/orders/{order_id}"` — and keeping the hole rather than dropping it is
+/// what lets the result compare equal to a declaration's `/orders/{id}`.
+fn path_text(expr: &ast::Expr) -> Option<String> {
+    let text = match expr {
+        ast::Expr::StringLiteral(s) => s.value.to_str().to_string(),
+        ast::Expr::FString(f) => {
+            let mut out = String::new();
+            for part in &f.value {
+                match part {
+                    ast::FStringPart::Literal(lit) => out.push_str(&lit.value),
+                    ast::FStringPart::FString(fs) => {
+                        for element in &fs.elements {
+                            match element {
+                                ast::InterpolatedStringElement::Literal(l) => {
+                                    out.push_str(&l.value);
+                                }
+                                ast::InterpolatedStringElement::Interpolation(_) => {
+                                    out.push_str("${}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    route::looks_like_path(&text).then_some(text)
+}
+
 /// `a.b.c` as written, when the expression is exactly a dotted name.
 fn dotted(e: &ast::Expr) -> Option<String> {
     match e {
@@ -1373,6 +1413,60 @@ impl CallCollector<'_, '_> {
             _ => {}
         }
     }
+
+    /// A call whose argument is shaped like a path is asking for a route —
+    /// whatever the callee is named.
+    ///
+    /// Recognising the *argument* rather than a list of blessed clients is
+    /// what makes a project-local wrapper visible: `fetch_json("/bridge/check")`
+    /// names no library this reader could have been taught. The cost is that
+    /// a file path can slip through; it will match no declaration, and the
+    /// account says how many did.
+    fn route_ref(&mut self, call: &ast::ExprCall) {
+        // `requests.get(…)`, `httpx.post(…)`, `client.delete(…)`: the verb is
+        // in the name when the client puts it there.
+        let mut verb = match &*call.func {
+            ast::Expr::Name(n) => route::Verb::from_name(&n.id),
+            ast::Expr::Attribute(a) => route::Verb::from_name(&a.attr.id),
+            _ => None,
+        };
+        let mut written = None;
+        for arg in &*call.arguments.args {
+            written = written.or_else(|| path_text(arg));
+            // `requests.request("POST", url)` states the verb positionally,
+            // which is the only shape that hides it from the callee's name.
+            if let ast::Expr::StringLiteral(s) = arg {
+                let text = s.value.to_str();
+                if text.chars().all(|c| c.is_ascii_alphabetic()) {
+                    verb = verb.or_else(|| route::Verb::from_name(text));
+                }
+            }
+        }
+        for kw in &*call.arguments.keywords {
+            let Some(name) = kw.arg.as_ref().map(|a| a.id.as_str()) else {
+                continue;
+            };
+            match name {
+                "url" | "uri" => written = written.or_else(|| path_text(&kw.value)),
+                "method" => {
+                    if let ast::Expr::StringLiteral(s) = &kw.value {
+                        verb = verb.or_else(|| route::Verb::from_name(s.value.to_str()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(written) = written {
+            let line = self.walker.line(call.range());
+            let caller = self.caller.clone();
+            self.walker.facts.requests.push(route::RouteRef {
+                symbol: caller,
+                verb,
+                written,
+                line,
+            });
+        }
+    }
 }
 
 impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
@@ -1429,6 +1523,7 @@ impl ruff_python_ast::visitor::Visitor<'_> for CallCollector<'_, '_> {
         }
         if let ast::Expr::Call(call) = expr {
             let line = self.walker.line(call.range());
+            self.route_ref(call);
             let shape = self.shapes.remove(&u32::from(call.range().start()));
             // A scheduler starts every coroutine it is handed beside its
             // caller — read from the name alone, which is what the source

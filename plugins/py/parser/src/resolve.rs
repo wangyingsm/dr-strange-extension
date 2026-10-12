@@ -4,6 +4,7 @@
 //! on where the chunk boundaries fell.
 
 use crate::{CallKind, Edge, FileFacts, Node, Props, Shape, edge_at};
+use dr_strange_ext::route;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -215,6 +216,17 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+
+    // ---- the routes each function asks for --------------------------------
+    // On the function that makes the call, not a node of their own: a request
+    // and the declaration that serves it are matched when someone asks, and
+    // an edge drawn here would freeze a guess about which handler that is.
+    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
+    let mut recorded = 0usize;
+    for node in &mut out.nodes {
+        recorded += asked.write(&node.key, &mut node.props);
+    }
+    out.notes.extend(asked.note(recorded));
 
     let mut edge_set: BTreeSet<(String, String, String)> = BTreeSet::new();
     let mut pending: Vec<Edge> = Vec::new();

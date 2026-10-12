@@ -137,6 +137,7 @@ dependencies = [
 name = "dr-strange-ext"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "wit-bindgen",
 ]
@@ -161,6 +162,7 @@ dependencies = [
 name = "drsg-py-parser"
 version = "1.0.0"
 dependencies = [
+ "dr-strange-ext",
  "ruff_python_ast",
  "ruff_python_parser",
  "ruff_source_file",

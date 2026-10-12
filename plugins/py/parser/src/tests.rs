@@ -954,3 +954,129 @@ async def consume(q: Queue):
             .collect::<Vec<_>>()
     );
 }
+
+// ---- the routes a call asks for -------------------------------------------
+
+/// The routes a function asks for, as the property records them.
+fn requests(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("requests")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every client spelling, and the one that matters most: a project-local
+/// wrapper that names no library this reader could have been taught.
+#[test]
+fn a_call_with_a_path_argument_asks_for_a_route() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "import requests\n\
+         \n\
+         def via_requests(order_id):\n\
+         \x20   return requests.get(f\"/api/orders/{order_id}\")\n\
+         \n\
+         def via_session(s):\n\
+         \x20   return s.request(\"POST\", \"/api/orders\")\n\
+         \n\
+         def via_kwargs(s):\n\
+         \x20   return s.request(method=\"DELETE\", url=\"/api/orders/1\")\n\
+         \n\
+         def via_wrapper():\n\
+         \x20   return fetch_json(\"/bridge/check/1\")\n",
+    )]));
+    assert_eq!(
+        requests(&a, "api.via_requests"),
+        vec!["GET /api/orders/{}".to_string()]
+    );
+    assert_eq!(
+        requests(&a, "api.via_session"),
+        vec!["POST /api/orders".to_string()],
+        "the verb is positional, which is the only shape the name hides"
+    );
+    assert_eq!(
+        requests(&a, "api.via_kwargs"),
+        vec!["DELETE /api/orders/1".to_string()],
+        "keyword arguments state both"
+    );
+    assert_eq!(
+        requests(&a, "api.via_wrapper"),
+        vec!["* /bridge/check/1".to_string()],
+        "the wrapper is visible because the argument is"
+    );
+}
+
+/// An f-string's hole is kept, which is what lets it compare equal to a
+/// declaration's `{id}`.
+#[test]
+fn an_f_string_path_keeps_its_hole() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "def one(order_id):\n\
+         \x20   return httpx.get(f\"/api/orders/{order_id}/items\")\n",
+    )]));
+    assert_eq!(
+        requests(&a, "api.one"),
+        vec!["GET /api/orders/{}/items".to_string()]
+    );
+    assert_eq!(
+        text(&node(&a, "api.one").props["requests_as_written"]["$value"][0]),
+        "/api/orders/${}/items",
+        "the source's own spelling, in the convention's hole"
+    );
+}
+
+/// An absolute URL names the same route as the path inside it, and a query
+/// says nothing about which handler serves it.
+#[test]
+fn an_absolute_url_and_a_query_reduce_to_the_path() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "def go():\n\
+         \x20   return httpx.get(\"https://api.example.com/v1/orders?page=2\")\n",
+    )]));
+    assert_eq!(requests(&a, "api.go"), vec!["GET /v1/orders".to_string()]);
+}
+
+/// A string that is not path-shaped is not a route, and a function that asks
+/// for nothing carries no property at all.
+#[test]
+fn only_a_path_shaped_argument_counts() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "def plain():\n\
+         \x20   return compute(\"orders\", 2)\n\
+         \n\
+         def logs():\n\
+         \x20   print(\"a b c\")\n",
+    )]));
+    assert!(requests(&a, "api.plain").is_empty());
+    assert!(requests(&a, "api.logs").is_empty());
+    assert!(
+        !node(&a, "api.plain").props.contains_key("requests"),
+        "no property rather than an empty one"
+    );
+}
+
+/// The account says what was recorded, since a request is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_requests_are_counted_in_the_report() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "def go():\n\
+         \x20   return httpx.get(\"/api/orders\")\n",
+    )]));
+    assert!(
+        a.notes.iter().any(|n| n.contains("route(s) asked for")),
+        "{:?}",
+        a.notes
+    );
+}
