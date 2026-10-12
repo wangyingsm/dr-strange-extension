@@ -21,7 +21,7 @@ pub use resolve::{Assembled, assemble};
 use dr_strange_ext::route;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use swc_common::comments::{Comment, CommentKind, SingleThreadedComments};
@@ -242,10 +242,35 @@ pub struct FileFacts {
     /// class — `Promise<T>` unwraps to `T`, which is what an async factory
     /// hands the awaiter.
     pub returns: Vec<(String, String)>,
-    /// The routes this file's functions ask for — a call argument shaped like
-    /// a path. Attached to the calling function in [`assemble`].
+    /// The routes this file's calls state, each with the evidence for which
+    /// side of the convention it is on. Split in [`assemble`].
     #[serde(default)]
-    pub requests: Vec<route::RouteRef>,
+    pub routes: Vec<RouteSite>,
+}
+
+/// One route a call states, and what the call did with it.
+///
+/// `app.get('/x', h)` and `axios.get('/x')` are the same shape — a verb in
+/// the callee's name, a path in an argument — and what tells a declaration
+/// from a request is whether the path was handed to a **handler**: a
+/// registration hands it to someone, a client call does not.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteSite {
+    /// The route as written, on the function the call sits in.
+    pub route: route::RouteRef,
+    pub handler: Option<Handler>,
+}
+
+/// The handler a registration call hands its path to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Handler {
+    /// Written in place: an arrow or a function expression. A config object
+    /// never is, which is what keeps `axios.get('/x', cfg)` a request.
+    InPlace,
+    /// Named by a bare identifier, resolved in [`assemble`]: a declaration
+    /// only when the name turns out to be an in-tree callable, which is what
+    /// keeps `axios.get('/x', config)` a request too.
+    Named(String),
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -448,6 +473,9 @@ fn parse_file(path: &str, package: &Package, text: &str, include_source: bool) -
             for stmt in &s.body {
                 w.stmt(stmt, false, None);
             }
+            for stmt in &s.body {
+                w.top_level_route(stmt);
+            }
         }
     }
 
@@ -542,6 +570,7 @@ impl Walker<'_> {
                 ast::ModuleItem::Stmt(stmt) => self.stmt(stmt, false, None),
             }
         }
+        self.top_level_routes(items);
     }
 
     fn module_decl(&mut self, md: &ast::ModuleDecl) {
@@ -1518,6 +1547,7 @@ impl Walker<'_> {
             caller: caller.to_string(),
             in_class: class.map(|(n, _)| n.to_string()),
             shapes: std::collections::BTreeMap::new(),
+            routed: BTreeSet::new(),
         };
         body.visit_with(&mut v);
     }
@@ -1528,6 +1558,7 @@ impl Walker<'_> {
             caller: caller.to_string(),
             in_class: class.map(|(n, _)| n.to_string()),
             shapes: std::collections::BTreeMap::new(),
+            routed: BTreeSet::new(),
         };
         expr.visit_with(&mut v);
     }
@@ -1744,6 +1775,13 @@ struct CallCollector<'a, 'b> {
     /// children on the way down, and the call reads its own stamp when the
     /// walk arrives.
     shapes: std::collections::BTreeMap<u32, Shape>,
+    /// The call spans a route chain already read, by where each starts.
+    ///
+    /// A chain is read whole at its outermost call, because only together do
+    /// `router.route('/x')` and `.get(h)` state one route; the walk reaches
+    /// each inner link again on its own, and this is what stops it being
+    /// read twice.
+    routed: BTreeSet<u32>,
 }
 
 /// Whether a callee starts what it is handed beside its caller.
@@ -1832,20 +1870,103 @@ impl CallCollector<'_, '_> {
         });
     }
 
-    /// A call whose argument is shaped like a path is asking for a route —
-    /// whatever the callee is named.
+    /// The routes the chain this call belongs to states, read once at its
+    /// outermost link.
+    fn route_ref(&mut self, node: &ast::CallExpr) {
+        if !self.routed.insert(node.span.lo.0) {
+            return;
+        }
+        let caller = self.caller.clone();
+        let consumed = self.walker.route_chain(&caller, node);
+        self.routed.extend(consumed);
+    }
+}
+
+/// What one call states about a route: the verb its callee names, the path an
+/// argument holds, and the handler it hands that path to.
+struct Stated {
+    verb: Option<route::Verb>,
+    written: Option<String>,
+    handler: Option<Handler>,
+}
+
+impl Walker<'_> {
+    /// Every route a call chain states, read at its outermost call.
     ///
-    /// Recognising the *argument* rather than a list of blessed clients is
+    /// A chain may split the path from the verb: `router.route('/x')` states
+    /// the path and does nothing with it, and each `.get(h)` after it states
+    /// a verb and a handler and no path. A link that states a path but
+    /// neither a verb nor a handler has handed it onward, which is exactly
+    /// what tells that chain from `axios.get('/x').then(cb)` — where the
+    /// first link is the request and `.then` is nobody's registration.
+    ///
+    /// Returns the spans of the inner links, so a walk that reaches them
+    /// again does not read them twice.
+    fn route_chain(&mut self, caller: &str, node: &ast::CallExpr) -> Vec<u32> {
+        let mut links = vec![node];
+        loop {
+            let last = links[links.len() - 1];
+            let ast::Callee::Expr(callee) = &last.callee else {
+                break;
+            };
+            let ast::Expr::Member(m) = &**callee else {
+                break;
+            };
+            let ast::Expr::Call(inner) = &*m.obj else {
+                break;
+            };
+            links.push(inner);
+        }
+        let consumed: Vec<u32> = links[1..].iter().map(|c| c.span.lo.0).collect();
+        links.reverse();
+
+        let mut base: Option<String> = None;
+        let count = links.len();
+        for (i, link) in links.iter().enumerate() {
+            let stated = self.stated(link);
+            let outermost = i + 1 == count;
+            if !outermost
+                && stated.written.is_some()
+                && stated.verb.is_none()
+                && stated.handler.is_none()
+            {
+                base = stated.written;
+                continue;
+            }
+            let Some(written) = stated.written.or_else(|| base.clone()) else {
+                continue;
+            };
+            let line = self.line(link.span);
+            self.facts.routes.push(RouteSite {
+                route: route::RouteRef {
+                    symbol: caller.to_string(),
+                    verb: stated.verb,
+                    written,
+                    line,
+                },
+                handler: stated.handler,
+            });
+        }
+        consumed
+    }
+
+    /// What one call states, read from its callee's name and its arguments.
+    ///
+    /// Recognising the *argument* rather than a list of blessed frameworks is
     /// what makes a project-local wrapper visible: `request('/bridge/check')`
     /// names no library this reader could have been taught. The cost is that
-    /// a router push or a file path can slip through; it will match no
-    /// declaration, and the account says how many did.
-    fn route_ref(&mut self, node: &ast::CallExpr) {
+    /// a router push or a file path can slip through; it will match nothing
+    /// on the other side, and the account says how many did.
+    fn stated(&self, node: &ast::CallExpr) -> Stated {
         let ast::Callee::Expr(callee) = &node.callee else {
-            return;
+            return Stated {
+                verb: None,
+                written: None,
+                handler: None,
+            };
         };
-        // `axios.get(…)`, `$http.post(…)`, `fetch(…)`: the verb is in the
-        // name when the client puts it there.
+        // `axios.get(…)`, `app.post(…)`, `fetch(…)`: the verb is in the name
+        // when the framework puts it there.
         let mut verb = match &**callee {
             ast::Expr::Member(m) => m
                 .prop
@@ -1855,8 +1976,13 @@ impl CallCollector<'_, '_> {
             _ => None,
         };
         let mut written = None;
+        // The last handler-ish argument wins: Express reads `get(p, auth, h)`
+        // as middleware then handler, and `h` is what serves the path.
+        let mut handler = None;
         for arg in &node.args {
             match &*arg.expr {
+                ast::Expr::Arrow(_) | ast::Expr::Fn(_) => handler = Some(Handler::InPlace),
+                ast::Expr::Ident(i) => handler = Some(Handler::Named(i.sym.to_string())),
                 // A config object states both: `{ url: '/x', method: 'post' }`.
                 ast::Expr::Object(obj) => {
                     for prop in &obj.props {
@@ -1886,14 +2012,45 @@ impl CallCollector<'_, '_> {
                 other => written = written.or_else(|| path_text(other)),
             }
         }
-        if let Some(written) = written {
-            let line = self.walker.line(node.span);
-            self.walker.facts.requests.push(route::RouteRef {
-                symbol: self.caller.clone(),
-                verb,
-                written,
-                line,
-            });
+        Stated {
+            verb,
+            written,
+            handler,
+        }
+    }
+
+    /// Routes registered in the module's own body — `app.get('/orders', h)`
+    /// at the top level, which is where a small Express or Koa app writes
+    /// them.
+    ///
+    /// A narrow walk on purpose: expression statements only, and no descent
+    /// into a handler, whose body `collect_calls` already covers. The module
+    /// is the symbol such a route belongs to when its handler is written in
+    /// place and has no name of its own.
+    fn top_level_routes(&mut self, items: &[ast::ModuleItem]) {
+        for item in items {
+            if let ast::ModuleItem::Stmt(stmt) = item {
+                self.top_level_route(stmt);
+            }
+        }
+    }
+
+    /// One top-level statement's route chain, when it is a bare call.
+    ///
+    /// A file with neither an import nor an export parses as a script rather
+    /// than a module, and a single-file Express app is exactly that — so both
+    /// program shapes come through here.
+    fn top_level_route(&mut self, stmt: &ast::Stmt) {
+        let ast::Stmt::Expr(e) = stmt else {
+            return;
+        };
+        let mut expr = &*e.expr;
+        while let ast::Expr::Await(a) = expr {
+            expr = &a.arg;
+        }
+        if let ast::Expr::Call(c) = expr {
+            let module = self.module.clone();
+            self.route_chain(&module, c);
         }
     }
 }

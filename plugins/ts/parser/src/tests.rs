@@ -1245,3 +1245,148 @@ fn the_requests_are_counted_in_the_report() {
         a.notes
     );
 }
+
+// ---- the routes a registration call declares ------------------------------
+
+/// The routes a symbol serves, as the property records them.
+fn serves(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("serves")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A registration hands its path to a handler, and that handler is what
+/// serves it — the one fact that tells `app.get('/x', h)` from
+/// `axios.get('/x')`, which are otherwise the same shape.
+#[test]
+fn a_registration_names_the_handler_that_serves_it() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/handlers.ts",
+            "export function listOrders(req: any, res: any) { res.send([]); }",
+        ),
+        (
+            "src/app.ts",
+            r#"
+        import { listOrders } from './handlers';
+        const app = express();
+        app.get('/api/orders', listOrders);
+        app.post('/api/orders', (req, res) => { res.send(); });
+        app.delete('/api/orders/:id', auth, (req, res) => { res.send(); });
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/handlers.listOrders"),
+        vec!["GET /api/orders".to_string()],
+        "an imported handler is named, not the module that registered it"
+    );
+    assert_eq!(
+        serves(&a, "web/src/app"),
+        vec![
+            "DELETE /api/orders/{}".to_string(),
+            "POST /api/orders".to_string()
+        ],
+        "a handler written in place has no name, so the module holds the route"
+    );
+}
+
+/// A router's fluent chain registers every route on it, and the verb comes
+/// from each call's own name.
+#[test]
+fn a_fluent_chain_registers_every_route_on_it() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/routes.ts",
+            r#"
+        router.route('/api/orders').get((req, res) => {}).post((req, res) => {});
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/routes"),
+        vec![
+            "GET /api/orders".to_string(),
+            "POST /api/orders".to_string()
+        ],
+        "the path is stated once and each verb in the chain serves it"
+    );
+}
+
+/// A second argument that is not a handler leaves the call a request — which
+/// is what keeps `axios.get(url, config)` on the side it belongs to.
+#[test]
+fn a_config_argument_is_not_a_handler() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            r#"
+        const config = { timeout: 1000 };
+        export function fetchOrders() { return axios.get('/api/orders', config); }
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/api.fetchOrders"),
+        vec!["GET /api/orders".to_string()],
+        "a name that is no callable hands the path to nobody"
+    );
+    assert!(
+        serves(&a, "web/src/api.fetchOrders").is_empty(),
+        "and so declares nothing"
+    );
+}
+
+/// The account says what was declared, since a declaration is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_declarations_are_counted_in_the_report() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/app.ts",
+            "app.get('/api/orders', (req, res) => { res.send(); });",
+        ),
+    ]));
+    assert!(
+        a.notes.iter().any(|n| n.contains("declared by a handler")),
+        "{:?}",
+        a.notes
+    );
+}
+
+/// A handler held in a `const` is a function too — the arrow idiom, which is
+/// how most TypeScript writes one.
+#[test]
+fn an_arrow_held_in_a_const_is_a_handler() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/app.ts",
+            r#"
+        export const listOrders = (req: any, res: any) => { res.send([]); };
+        app.get('/api/orders', listOrders);
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "web/src/app.listOrders"),
+        vec!["GET /api/orders".to_string()],
+        "the arrow is the handler, and it is where the route lands"
+    );
+    assert!(
+        serves(&a, "web/src/app").is_empty(),
+        "so the module holds none of it"
+    );
+}

@@ -5,7 +5,7 @@
 //! boundaries fell, and does not: everything keys on file-order-stable
 //! indexes, never on how the facts were batched.
 
-use crate::{CallKind, EXTENSIONS, Edge, FileFacts, Node, Props, Shape, edge_at};
+use crate::{CallKind, EXTENSIONS, Edge, FileFacts, Handler, Node, Props, Shape, edge_at};
 use dr_strange_ext::route;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -207,17 +207,6 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             out.nodes.push(n.clone());
         }
     }
-
-    // ---- the routes each function asks for --------------------------------
-    // On the function that makes the call, not a node of their own: a request
-    // and the declaration that serves it are matched when someone asks, and
-    // an edge drawn here would freeze a guess about which handler that is.
-    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
-    let mut recorded = 0usize;
-    for node in &mut out.nodes {
-        recorded += asked.write(&node.key, &mut node.props);
-    }
-    out.notes.extend(asked.note(recorded));
 
     let mut pending_edges: Vec<Edge> = Vec::new();
     // One caller may reach one callee several ways — `await f()` on one line
@@ -936,6 +925,58 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             props: Props::new(),
         });
     }
+
+    // ---- the two halves, written on the symbols that state them -----------
+    // Which side a call is on is decided here and nowhere earlier: only a
+    // resolved name tells a handler from a config object. Never a node or an
+    // edge of their own — a request and the declaration that serves it are
+    // matched when someone asks, and an edge drawn here would freeze a guess
+    // about which handler that is.
+    //
+    // A handler is a function, not any name a module happens to declare: an
+    // `ix.decls` entry says only "a value", and `axios.get('/x', config)`
+    // hands its path to a config object.
+    let functions: BTreeSet<String> = out
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.label.as_str(), "Function" | "Method"))
+        .map(|n| n.key.clone())
+        .collect();
+    let mut asked_refs: Vec<route::RouteRef> = Vec::new();
+    let mut served_refs: Vec<route::RouteRef> = Vec::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for site in &f.routes {
+            let handler = match &site.handler {
+                // A registration hands the path to a handler, and that
+                // handler is the symbol serving it.
+                Some(Handler::Named(name)) => callable_named(&ix, f, &bindings, &classes, name)
+                    .filter(|k| functions.contains(k)),
+                // Written in place, so the symbol that registered it is the
+                // only one there is.
+                Some(Handler::InPlace) => Some(site.route.symbol.clone()),
+                None => None,
+            };
+            match handler {
+                Some(symbol) => served_refs.push(route::RouteRef {
+                    symbol,
+                    ..site.route.clone()
+                }),
+                // Nothing was handed anywhere: the call is asking.
+                None => asked_refs.push(site.route.clone()),
+            }
+        }
+    }
+    let asked = route::Routes::of(route::Side::Requests, &asked_refs);
+    let served = route::Routes::of(route::Side::Serves, &served_refs);
+    let mut recorded = 0usize;
+    let mut declares = 0usize;
+    for node in &mut out.nodes {
+        recorded += asked.write(&node.key, &mut node.props);
+        declares += served.write(&node.key, &mut node.props);
+    }
+    out.notes.extend(served.note(declares));
+    out.notes.extend(asked.note(recorded));
 
     // ---- the account ------------------------------------------------------
     if unresolved > 0 {
