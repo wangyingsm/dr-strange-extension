@@ -3545,19 +3545,26 @@ fn the_declarations_are_counted_in_the_report() {
     );
 }
 
-/// A mount gives a router a prefix, and the function doing it serves nothing
-/// and asks for nothing — axum's `nest` and actix's `scope` alike.
+/// A nest gives a router a prefix, and every route the function it names
+/// registered is under it — while the function doing the nesting states no
+/// route of its own.
 #[test]
-fn a_mount_states_no_route_of_its_own() {
+fn a_nested_routers_prefix_reaches_its_routes() {
     let t = Tree::new("routesmount");
     t.write(
         "src/lib.rs",
         r#"
 pub async fn list() -> String { String::new() }
 
-pub fn api() -> Router { Router::new().route("/orders", get(list)) }
+pub async fn health() -> String { String::new() }
 
-pub fn app() -> Router { Router::new().nest("/api", api()) }
+pub fn orders() -> Router { Router::new().route("/orders", get(list)) }
+
+pub fn v1() -> Router { Router::new().nest("/v1", orders()) }
+
+pub fn app() -> Router {
+    Router::new().nest("/api", v1()).route("/health", get(health))
+}
 
 pub fn scoped() -> Scope { web::scope("/api").service(list) }
 "#,
@@ -3565,13 +3572,18 @@ pub fn scoped() -> Scope { web::scope("/api").service(list) }
     let a = run(&t);
     assert_eq!(
         serves(&a, "crate::list"),
-        vec!["GET /orders".to_string()],
-        "the nested route is still read, without the prefix it is given later"
+        vec!["GET /api/v1/orders".to_string()],
+        "two nests, read in either order, are one path"
     );
-    for key in ["crate::app", "crate::scoped"] {
+    assert_eq!(
+        serves(&a, "crate::health"),
+        vec!["GET /health".to_string()],
+        "a route on the mounting router itself carries no prefix"
+    );
+    for key in ["crate::app", "crate::v1", "crate::scoped"] {
         assert!(
-            requests(&a, key).is_empty() && serves(&a, key).is_empty(),
-            "{key} states no route of its own"
+            requests(&a, key).is_empty(),
+            "{key} asks for nothing: a nest is not a request"
         );
     }
 }

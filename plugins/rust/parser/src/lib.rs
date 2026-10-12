@@ -189,6 +189,11 @@ pub struct FileFacts {
     /// name resolves.
     #[serde(default)]
     routes: Vec<Site>,
+    /// Every router this file mounts under a path: `.nest("/api", api())`.
+    /// The routes were hung inside that function's body, so the two are
+    /// joined in [`assemble`].
+    #[serde(default)]
+    mounts: Vec<MountSite>,
     /// `(owner key, attribute path as written, the whole attribute, line)` —
     /// `#[tokio::main]`, `#[get("/health")]`. The path is what the node is;
     /// the text rides on the edge, so `get` stays one node with a route per
@@ -874,6 +879,7 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                         fn_refs: body.fn_refs,
                         closures: body.closures,
                         requests: body.requests,
+                        mounts: body.mounts,
                         closure_sigs: closure_sig(&m.sig),
                         ret: ret_written(&m.sig),
                         param_types: sig_params(&m.sig),
@@ -947,6 +953,9 @@ struct ImplMethod {
     /// The routes this method's calls ask for.
     #[serde(default)]
     requests: Vec<Asked>,
+    /// The routers this method mounts under a path.
+    #[serde(default)]
+    mounts: Vec<Mounted>,
 }
 
 /// Record every call and struct literal this body holds, for later
@@ -968,6 +977,12 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
     }
     for asked in &body.requests {
         f.routes.push(asked.at(caller));
+    }
+    for mount in &body.mounts {
+        f.mounts.push(MountSite {
+            under: caller.to_string(),
+            mount: mount.clone(),
+        });
     }
 }
 
@@ -1249,6 +1264,8 @@ struct BodyFacts {
     /// The routes this body's calls ask for, each still waiting for the key
     /// of the function that holds them.
     requests: Vec<Asked>,
+    /// The routers this body mounts under a path, likewise waiting.
+    mounts: Vec<Mounted>,
 }
 
 /// One route a call states, read before the body's own key is known: an impl
@@ -1300,6 +1317,23 @@ impl Asked {
 struct Site {
     symbol: String,
     asked: Asked,
+}
+
+/// One router mounted under a path, before the body's own key is known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Mounted {
+    prefix: String,
+    /// The router being mounted, as written: the function `.nest("/api",
+    /// api())` calls, whose body hung the routes.
+    mounted: String,
+}
+
+/// One mount, keyed to the symbol that made it — which may itself be mounted
+/// somewhere, so a router under a router is under both.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MountSite {
+    under: String,
+    mount: Mounted,
 }
 
 /// The path an expression states, if it states one: a string literal, or a
@@ -1357,6 +1391,25 @@ fn handed<'a>(args: impl Iterator<Item = &'a syn::Expr>) -> (bool, Option<String
         }
     }
     (in_place, named)
+}
+
+/// The router an argument names: `api()` calls the function whose body hung
+/// the routes, and a bare `api` names it directly.
+///
+/// A path's last segment only, the way every other name here is read, so
+/// `routes::api()` and `api()` are one name for `fns` to resolve.
+fn router_named(e: &syn::Expr) -> Option<String> {
+    let last = |p: &syn::Path| p.segments.last().map(|s| s.ident.to_string());
+    match e {
+        syn::Expr::Call(c) => match &*c.func {
+            syn::Expr::Path(p) => last(&p.path),
+            _ => None,
+        },
+        syn::Expr::Path(p) => last(&p.path),
+        syn::Expr::Reference(r) => router_named(&r.expr),
+        syn::Expr::MethodCall(m) => router_named(&m.receiver),
+        _ => None,
+    }
 }
 
 /// The verb-and-handler pairs an axum method router states: `get(list)`, and
@@ -1500,9 +1553,17 @@ fn call_names(block: &syn::Block) -> BodyFacts {
         /// resolved name tells a handler from a value the call happens to
         /// take.
         fn route_ref(&mut self, verb: Option<&syn::Ident>, args: &Args, line: u64) {
-            // `.nest("/api", api())`, `web::scope("/api")`: the path belongs
-            // to the routes hung on that router, not to this call.
+            // `.nest("/api", api())`: the path belongs to the routes hung
+            // inside that router, not to this call. The prefix is a fact of
+            // its own, joined at assemble with whatever the function it names
+            // registered.
             if verb.is_some_and(|v| route::mounts(&v.to_string())) {
+                let Some(prefix) = args.iter().find_map(path_text) else {
+                    return;
+                };
+                if let Some(mounted) = args.iter().rev().find_map(router_named) {
+                    self.facts.mounts.push(Mounted { prefix, mounted });
+                }
                 return;
             }
             let verb = verb.and_then(|v| route::Verb::from_name(&v.to_string()));
@@ -2357,6 +2418,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // An impl method's routes, keyed here because only this walk can spell
     // `<type>::<name>`; a free function's are keyed in `collect_calls`.
     let mut method_sites: Vec<Site> = Vec::new();
+    let mut method_mounts: Vec<MountSite> = Vec::new();
     // Routes an attribute declares, on the item it sits on: `#[get("/x")]`
     // names the handler by being written on it, so nothing is resolved.
     let mut declared_routes: Vec<route::RouteRef> = Vec::new();
@@ -2695,6 +2757,12 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 }
                 for asked in &m.requests {
                     method_sites.push(asked.at(&mkey));
+                }
+                for mount in &m.mounts {
+                    method_mounts.push(MountSite {
+                        under: mkey.clone(),
+                        mount: mount.clone(),
+                    });
                 }
                 // `Self` means this block's type, and only this block knows
                 // which — rewritten here for paths, returns and locals alike.
@@ -3471,6 +3539,51 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // that serves it are matched when someone asks, and an edge drawn here
     // would freeze a guess about which handler that is. Last, because a node
     // written after this point is never asked.
+    // The prefix a mounted router carries, by the key of the function whose
+    // body hung the routes: `.nest("/api", api())` says everything `api`
+    // registered is under `/api`, and `api` is usually in another file.
+    //
+    // Iterated because a router nested inside a nested router is under both,
+    // and bounded rather than recursive: deeper than any real router tree,
+    // and a cycle must not hang a parse.
+    let mut pairs: Vec<(String, String, &str)> = Vec::new();
+    for site in files.iter().flat_map(|f| &f.mounts).chain(&method_mounts) {
+        let Some(target) = fns
+            .get(&site.mount.mounted)
+            .and_then(|cands| pick(&site.under, cands, &scopes))
+        else {
+            continue;
+        };
+        pairs.push((target.clone(), site.mount.prefix.clone(), &site.under));
+    }
+    let mut mounted: BTreeMap<String, String> = BTreeMap::new();
+    for (key, prefix, _) in &pairs {
+        mounted.insert(key.clone(), prefix.clone());
+    }
+    for _ in 0..4 {
+        let mut grew = false;
+        for (key, prefix, under) in &pairs {
+            let Some(outer) = mounted.get(*under).cloned() else {
+                continue;
+            };
+            let joined = route::join(&outer, prefix);
+            if mounted.get(key) != Some(&joined) {
+                mounted.insert(key.clone(), joined);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // A mounted function's own attribute routes are under the prefix too,
+    // which is how actix's `#[get("/orders")]` under a scope reads.
+    for r in &mut declared_routes {
+        if let Some(prefix) = mounted.get(&r.symbol) {
+            r.written = route::join(prefix, &r.written);
+        }
+    }
+
     let mut asked_refs: Vec<route::RouteRef> = Vec::new();
     for site in files.iter().flat_map(|f| &f.routes).chain(&method_sites) {
         let handler = site
@@ -3480,15 +3593,22 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             .and_then(|name| fns.get(name))
             .and_then(|cands| pick(&site.symbol, cands, &scopes))
             .filter(|target| **target != site.symbol);
+        // The path is under whatever prefix the function that registered it
+        // was mounted with — read from the registering symbol, before the
+        // route is re-keyed onto its handler.
+        let mut asked = site.asked.clone();
+        if let Some(prefix) = mounted.get(&site.symbol) {
+            asked.written = route::join(prefix, &asked.written);
+        }
         match handler {
             // A registration hands the path to a handler, and that handler is
             // the symbol serving it.
-            Some(target) => declared_routes.push(site.asked.by(target)),
+            Some(target) => declared_routes.push(asked.by(target)),
             // Written in place, so the symbol that registered it is the only
             // one there is.
-            None if site.asked.in_place => declared_routes.push(site.asked.by(&site.symbol)),
+            None if asked.in_place => declared_routes.push(asked.by(&site.symbol)),
             // Nothing was handed anywhere: the call is asking.
-            None => asked_refs.push(site.asked.by(&site.symbol)),
+            None => asked_refs.push(asked.by(&site.symbol)),
         }
     }
     let asked = route::Routes::of(route::Side::Requests, &asked_refs);
