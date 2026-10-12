@@ -64,6 +64,39 @@ cannot move where the graph says it starts.
 | `RECEIVES` | function → a channel it reads from (`<-ch`, `range ch`, a `select` case) | the receive |
 | `USES_TYPE` | declaration → a type it is **typed by**, `role` on the edge (`field`, `param`, `return`) and the union when one pair is written twice. Walked through slices, maps, channels and generic arguments — where [typeRef] stops, because a `[]Job` depends on `Job` even though its methods are not `Job`'s. In-tree types only | — |
 
+## Routes
+
+An HTTP route is the one reference this plugin cannot turn into an edge: the
+handler or the caller is in another language, often another repository, and
+between the two sides there is only a string. So the plugin records what the
+source *states* and leaves the match to drsg's `wire`, which computes it per
+call and never stores it.
+
+On the symbol that already exists:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the handler a registration call names | `GET /api/orders/{}` — the verb, and the path with every variable segment reduced to `{}` |
+| `requests` | the function making the call | the same shape; `*` where the source states no verb |
+| `serves_as_written` / `requests_as_written` | both | the path exactly as the source wrote it, before normalising |
+
+**Declarations** are registration calls, which is Go's only idiom — there are
+no annotations to read. `r.GET("/orders/:id", Detail)` records on `Detail`, and
+the verb comes from the callee's own name, so gin, echo, and
+`http.HandleFunc`'s verbless form all land through the same rule rather than a
+framework table. A registration naming a handler in another package records
+there, across files.
+
+**A group's prefix reaches the routes on it.** `g := r.Group("/api")` gives a
+router a prefix that belongs to every route registered on `g` and to none of
+them yet, so the function doing the grouping serves nothing — and a handler
+registered on `r` instead of `g` keeps its path whole.
+
+**Requests** are any call with a path-shaped string argument, whatever the
+callee is called — `http.Get`, a `client.Do` with a literal URL, and a
+project-local wrapper alike. An absolute URL or a query string reduces to the
+path.
+
 ## Resolution — the certainty line
 
 - An **unqualified call** binds to a function another file of the same
@@ -144,3 +177,10 @@ the copy-before-use rule every wasmexport boundary obeys.
 Methods promoted from embedded structs are not walked onto the outer type;
 generic instantiations are not tracked (a call binds to the declaration);
 `init` bodies are uncounted by design.
+
+Routes: gorilla/mux writes the verb in a chained `.Methods("GET")` rather than
+in the callee's name, so such a route records `*` and matches every verb on
+its path. chi's `Route(path, fn)` is a mount, not a route, but `route` is
+deliberately not a mount word — axum's `.route` *is* a route — so chi's prefix
+does not reach the handlers under it. A router handed to another function to
+register on loses its prefix.
