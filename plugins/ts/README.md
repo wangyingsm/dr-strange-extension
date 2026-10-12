@@ -66,6 +66,42 @@ cannot move where the graph says it starts.
 | `IMPLEMENTS` / `EXTENDS` | `class C implements I` / class→class, interface→interface — **syntactic** in TS, so certain where Go's structural check could not be | class/interface declaration |
 | `USES_TYPE` | declaration → a type it is **typed by**, `role` on the edge (`field`, `param`, `return`). Array elements, unions and generic arguments are walked — `Job[]` is a dependency on `Job`. **Only where an annotation was written**: an unannotated parameter states no type, and its silence is not the absence of a dependency | — |
 
+## Routes
+
+An HTTP route is the one reference this plugin cannot turn into an edge: the
+handler is in another language, often another repository, and between the two
+sides there is only a string. So the plugin records what the source *states*
+and leaves the match to drsg's `wire`, which computes it per call and never
+stores it.
+
+On the symbol that already exists:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the handler a registration or a decorator names | `GET /api/orders/{}` — the verb, and the path with every variable segment reduced to `{}` |
+| `requests` | the function making the call | the same shape; `*` where the source states no verb |
+| `serves_as_written` / `requests_as_written` | both | the path exactly as the source wrote it, before normalising |
+
+**Declarations.** A registration call whose callee names the verb —
+`app.get('/x', h)`, `router.post(...)`, a fluent `.get(...).post(...)` chain —
+records on the handler it names, an arrow written inline included. A decorated
+class records too: `@Controller('/api')` on the class composes with `@Get(':id')`
+on the method, and a class decorator whose only argument is path-shaped needs no
+recognised name. A decorator that declares no route declares nothing.
+
+**Requests.** Any call with a path-shaped string argument, whatever the callee
+is called — which is the only way a project-local `request('/x')` wrapper is
+ever visible. A template literal keeps its hole (`` `/orders/${id}` `` →
+`/orders/{}`), and an absolute URL or a query string reduces to the path. A
+client's own base reaches the paths it asks for: `axios.create({ baseURL })`
+and a module-level literal const both join.
+
+**Mounts are not routes.** `app.use('/api', router)` gives a router a prefix
+that belongs to every route hung on it and to none of them yet, so the mounting
+function serves nothing and asks for nothing. The prefix reaches the routes
+instead — through two levels of mounting as well — and a router nobody mounts
+states its paths whole.
+
 ## Resolution — the certainty line
 
 - **Concurrency is a fact about the call site, not the declaration.**
@@ -139,7 +175,11 @@ $ drsg plugin install component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm
 
 ## Known limits
 
-Decorators are skipped in v1 (one comment in the source says so);
-`tsconfig` path aliases (`@/…`) are build configuration a parser does not
-have — counted as missed specifiers; dynamic `import()` with non-literal
-arguments is opaque.
+A decorator is read for the routes it declares and is not otherwise recorded
+as a fact — its name and arguments reach no node, unlike the java plugin's
+annotations. `tsconfig` path aliases (`@/…`) are build configuration a parser
+does not have — counted as missed specifiers; dynamic `import()` with
+non-literal arguments is opaque. A base assembled at runtime
+(`process.env.API_URL`) is not a literal, so the paths under it stay relative
+and match nothing; a router handed to another function to mount loses its
+prefix.
