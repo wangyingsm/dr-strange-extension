@@ -11,3 +11,6 @@ logs/
 # Local MCP server registration — carries a bearer token for a `serve watch`
 # instance bound to an ephemeral, machine-local port. Never share or commit.
 .mcp.json
+
+# drsg — local database, logs, and the MCP configs carrying a live bearer token
+.cursor/mcp.json
