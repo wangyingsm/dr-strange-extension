@@ -246,17 +246,52 @@ pub struct FileFacts {
     /// The routes this file's functions ask for — a call argument shaped like
     /// a path. Attached to the calling function in [`assemble`].
     #[serde(default)]
-    pub requests: Vec<route::RouteRef>,
+    pub requests: Vec<Stated>,
     /// The routes this file's functions declare — a decorator carrying a
     /// path. The decorated function is the handler, so no resolution is
     /// needed to know whose route it is.
     #[serde(default)]
-    pub declares: Vec<route::RouteRef>,
+    pub declares: Vec<Stated>,
+    /// `(name, value)` for every module-level binding to a plain string —
+    /// what a prefix written as a name resolves to.
+    #[serde(default)]
+    pub literals: Vec<(String, String)>,
+    /// `(name, prefix)` for every router or client this file builds with a
+    /// path of its own: `APIRouter(prefix="/api")`, `Blueprint(…,
+    /// url_prefix="/api")`, `httpx.Client(base_url="/api")`. Resolved in
+    /// [`assemble`], where one imported from another module resolves too.
+    ///
+    /// Named `prefixes` rather than `bases`, which this parser already uses
+    /// for a class's own.
+    #[serde(default)]
+    pub prefixes: Vec<(String, Base)>,
     /// The routes this module mounts — a module-level call handing a path to
     /// a view, which is how Django writes a URL conf. The handler's name is
     /// resolved in [`assemble`].
     #[serde(default)]
     pub mounts: Vec<Mounted>,
+}
+
+/// One route a symbol states, and the name it stated it through.
+///
+/// `router.get("/orders")` and `client.get("/orders")` both state a path
+/// relative to whatever that name was built with — an `APIRouter`'s prefix,
+/// a client's base URL — and the name is what that prefix is looked up by.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stated {
+    pub route: route::RouteRef,
+    #[serde(default)]
+    pub receiver: Option<String>,
+}
+
+/// The path a router or a client was built with, as the source states it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Base {
+    /// Written in place: `APIRouter(prefix="/api")`.
+    Literal(String),
+    /// Named: `APIRouter(prefix=API_PREFIX)`, resolved against the string
+    /// bindings of whichever module declares it.
+    Named(String),
 }
 
 /// One route a module-level registration states, before its handler is
@@ -1224,6 +1259,14 @@ impl Walker<'_> {
         for t in &a.targets {
             let ast::Expr::Name(n) = t else { continue };
             self.value_node(&n.id, None, Some(a.value.range()), n.range());
+            if let ast::Expr::StringLiteral(lit) = &*a.value {
+                self.facts
+                    .literals
+                    .push((n.id.to_string(), lit.value.to_str().to_string()));
+            }
+            if let Some(prefix) = built_with_base(&a.value) {
+                self.facts.prefixes.push((n.id.to_string(), prefix));
+            }
         }
     }
 
@@ -1382,11 +1425,14 @@ impl Walker<'_> {
                     continue;
                 }
                 for verb in &verbs {
-                    self.facts.declares.push(route::RouteRef {
-                        symbol: decl_key.to_string(),
-                        verb: *verb,
-                        written: path.clone(),
-                        line,
+                    self.facts.declares.push(Stated {
+                        route: route::RouteRef {
+                            symbol: decl_key.to_string(),
+                            verb: *verb,
+                            written: path.clone(),
+                            line,
+                        },
+                        receiver: receiver_of(&call.func),
                     });
                 }
             }
@@ -1489,6 +1535,42 @@ fn path_text(expr: &ast::Expr) -> Option<String> {
         _ => return None,
     };
     route::looks_like_path(&text).then_some(text)
+}
+
+/// The path a router or a client is built with, when the call states one.
+///
+/// `APIRouter(prefix="/api")` (FastAPI), `Blueprint(…, url_prefix="/api")`
+/// (Flask), `httpx.Client(base_url="/api")`. Read from the *keyword* rather
+/// than from a list of known types, the way a path is read from an argument:
+/// a project's own `make_client(base_url=…)` wrapper states it the same way
+/// and is seen the same way.
+fn built_with_base(value: &ast::Expr) -> Option<Base> {
+    const BASE_KEYWORDS: &[&str] = &["prefix", "url_prefix", "base_url", "base_path", "base"];
+    let ast::Expr::Call(call) = value else {
+        return None;
+    };
+    for kw in &*call.arguments.keywords {
+        let Some(name) = kw.arg.as_ref().map(|a| a.id.as_str()) else {
+            continue;
+        };
+        if !BASE_KEYWORDS.contains(&name) {
+            continue;
+        }
+        return match &kw.value {
+            ast::Expr::StringLiteral(s) => Some(Base::Literal(s.value.to_str().to_string())),
+            ast::Expr::Name(n) => Some(Base::Named(n.id.to_string())),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// The name a call was made on — `router` in `@router.get("/orders")`, which
+/// is what a prefix is looked up by.
+fn receiver_of(func: &ast::Expr) -> Option<String> {
+    let written = dotted(func)?;
+    let (root, rest) = written.split_once('.')?;
+    (!rest.is_empty()).then(|| root.to_string())
 }
 
 /// Does this literal look like a path written by a router that mounts its own
@@ -1640,11 +1722,15 @@ impl CallCollector<'_, '_> {
         if let Some(written) = written {
             let line = self.walker.line(call.range());
             let caller = self.caller.clone();
-            self.walker.facts.requests.push(route::RouteRef {
-                symbol: caller,
-                verb,
-                written,
-                line,
+            let receiver = receiver_of(&call.func);
+            self.walker.facts.requests.push(Stated {
+                route: route::RouteRef {
+                    symbol: caller,
+                    verb,
+                    written,
+                    line,
+                },
+                receiver,
             });
         }
     }

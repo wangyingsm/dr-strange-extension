@@ -3,7 +3,7 @@
 //! every chunk's facts together, in chunk order. The result must not depend
 //! on where the chunk boundaries fell.
 
-use crate::{CallKind, Edge, FileFacts, Node, Props, Shape, edge_at};
+use crate::{Base, CallKind, Edge, FileFacts, Node, Props, Shape, edge_at};
 use dr_strange_ext::route;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -321,10 +321,66 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     // registration names it by a word, so that word is resolved here — and
     // when it names nothing this tree declares, the module that registered
     // the route holds it, which is the only symbol there is.
+    //
+    // A router's or a client's own path, by the module that built it:
+    // `router.get("/orders")` under `APIRouter(prefix="/api")` states
+    // `/api/orders`, and `client.get("/orders")` under a base URL likewise.
+    let mut literals: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for f in &all {
+        let m = literals.entry(f.module_id.as_str()).or_default();
+        for (name, value) in &f.literals {
+            m.insert(name.as_str(), value.as_str());
+        }
+    }
+    let mut bases: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for (name, base) in &f.prefixes {
+            let resolved = match base {
+                Base::Literal(text) => Some(text.as_str()),
+                // A prefix written as a name: this module's own binding, or
+                // one it imported.
+                Base::Named(written) => literals
+                    .get(f.module_id.as_str())
+                    .and_then(|m| m.get(written.as_str()).copied())
+                    .or_else(|| {
+                        let (target, member) = bindings.get(written)?;
+                        literals.get(target.as_str())?.get(member.as_str()).copied()
+                    }),
+            };
+            if let Some(resolved) = resolved {
+                bases
+                    .entry(f.module_id.as_str())
+                    .or_default()
+                    .insert(name.as_str(), resolved);
+            }
+        }
+    }
+    let mut asked_refs: Vec<route::RouteRef> = Vec::new();
     let mut served_refs: Vec<route::RouteRef> = Vec::new();
     for f in &all {
-        served_refs.extend(f.declares.iter().cloned());
         let bindings = file_bindings(f);
+        // The path a receiver carries: built in this module, or imported from
+        // the one that built it.
+        let base_of = |name: &str| -> Option<&str> {
+            if let Some(found) = bases
+                .get(f.module_id.as_str())
+                .and_then(|m| m.get(name).copied())
+            {
+                return Some(found);
+            }
+            let (target, member) = bindings.get(name)?;
+            bases.get(target.as_str())?.get(member.as_str()).copied()
+        };
+        let joined = |stated: &crate::Stated| -> route::RouteRef {
+            let mut out = stated.route.clone();
+            if let Some(base) = stated.receiver.as_deref().and_then(base_of) {
+                out.written = route::join(base, &out.written);
+            }
+            out
+        };
+        served_refs.extend(f.declares.iter().map(&joined));
+        asked_refs.extend(f.requests.iter().map(&joined));
         for m in &f.mounts {
             let symbol = decl_of(f, &bindings, &m.handler).unwrap_or_else(|| m.module.clone());
             served_refs.push(route::RouteRef {
@@ -335,7 +391,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             });
         }
     }
-    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
+    let asked = route::Routes::of(route::Side::Requests, &asked_refs);
     let served = route::Routes::of(route::Side::Serves, &served_refs);
     let mut recorded = 0usize;
     let mut declares = 0usize;

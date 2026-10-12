@@ -1267,3 +1267,115 @@ fn an_unresolvable_view_leaves_the_route_on_its_module() {
     ]));
     assert_eq!(serves(&a, "app.urls"), vec!["* /health".to_string()]);
 }
+
+// ---- a router's and a client's own path ------------------------------------
+
+/// A router built with a prefix declares its routes under it, and a client
+/// built with a base URL asks for its paths under that — one rule, read from
+/// the keyword rather than from the type's name.
+#[test]
+fn a_prefix_reaches_the_routes_stated_through_it() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/orders.py",
+            "from fastapi import APIRouter\n\
+             \n\
+             router = APIRouter(prefix=\"/api/orders\")\n\
+             \n\
+             @router.get(\"/{order_id}\")\n\
+             def one(order_id: int):\n\
+             \x20   return order_id\n\
+             \n\
+             @router.post(\"/\")\n\
+             def create():\n\
+             \x20   return None\n",
+        ),
+        (
+            "app/legacy.py",
+            "from flask import Blueprint\n\
+             \n\
+             bp = Blueprint(\"legacy\", __name__, url_prefix=\"/legacy\")\n\
+             \n\
+             @bp.route(\"/ping\", methods=[\"GET\"])\n\
+             def ping():\n\
+             \x20   return None\n",
+        ),
+        (
+            "app/client.py",
+            "import httpx\n\
+             \n\
+             client = httpx.Client(base_url=\"/api\")\n\
+             \n\
+             def fetch_orders():\n\
+             \x20   return client.get(\"/orders\")\n",
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "app.orders.one"),
+        vec!["GET /api/orders/{}".to_string()],
+        "FastAPI's router prefix joins the path its decorator states"
+    );
+    assert_eq!(
+        serves(&a, "app.orders.create"),
+        vec!["POST /api/orders".to_string()],
+        "a trailing slash on the path adds nothing to the prefix"
+    );
+    assert_eq!(
+        serves(&a, "app.legacy.ping"),
+        vec!["GET /legacy/ping".to_string()],
+        "a Flask blueprint states its prefix the same way"
+    );
+    assert_eq!(
+        requests(&a, "app.client.fetch_orders"),
+        vec!["GET /api/orders".to_string()],
+        "and a client's base URL is the same fact on the other side"
+    );
+}
+
+/// A prefix written as a name resolves to the binding behind it, in this
+/// module or the one it was imported from — and a router imported from
+/// elsewhere carries its prefix with it.
+#[test]
+fn a_prefix_written_as_a_name_resolves_across_modules() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        ("app/config.py", "API_PREFIX = \"/api/v2\"\n"),
+        (
+            "app/routers.py",
+            "from fastapi import APIRouter\n\
+             \n\
+             from .config import API_PREFIX\n\
+             \n\
+             router = APIRouter(prefix=API_PREFIX)\n",
+        ),
+        (
+            "app/orders.py",
+            "from .routers import router\n\
+             \n\
+             @router.get(\"/orders\")\n\
+             def all_orders():\n\
+             \x20   return []\n",
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "app.orders.all_orders"),
+        vec!["GET /api/v2/orders".to_string()],
+        "the prefix crossed two modules to reach the path"
+    );
+}
+
+/// A name nothing states a prefix for leaves the path whole, rather than
+/// guessing one.
+#[test]
+fn a_name_with_no_prefix_leaves_the_path_whole() {
+    let a = run(&tree(vec![(
+        "api.py",
+        "app = FastAPI()\n\
+         \n\
+         @app.get(\"/health\")\n\
+         def health():\n\
+         \x20   return None\n",
+    )]));
+    assert_eq!(serves(&a, "api.health"), vec!["GET /health".to_string()]);
+}
