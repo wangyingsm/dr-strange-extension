@@ -3417,3 +3417,130 @@ fn a_filesystem_path_is_recorded_and_will_match_nothing() {
         "recorded, because only the argument's shape was read"
     );
 }
+
+// ---- the routes a declaration states --------------------------------------
+
+/// The routes a symbol serves, as the property records them.
+fn serves(a: &Assembled, key: &str) -> Vec<String> {
+    routes(a, key, "serves")
+}
+
+/// An attribute macro is a declaration carrying a path: actix and rocket
+/// write one the same way, and rocket's `#[route]` states its verb as a bare
+/// token.
+#[test]
+fn an_attribute_declares_what_it_serves() {
+    let t = Tree::new("routesattr");
+    t.write(
+        "src/lib.rs",
+        r#"
+#[get("/api/orders")]
+pub async fn list() -> String { String::new() }
+
+#[post("/api/orders/{id}")]
+pub async fn create() -> String { String::new() }
+
+#[get("/api/carts/<id>")]
+pub fn cart(id: u32) -> u32 { id }
+
+#[route(GET, uri = "/api/legacy")]
+pub fn legacy() {}
+
+#[tokio::main]
+pub async fn main() {}
+"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        serves(&a, "crate::list"),
+        vec!["GET /api/orders".to_string()],
+        "actix writes the verb in the attribute's name"
+    );
+    assert_eq!(
+        serves(&a, "crate::create"),
+        vec!["POST /api/orders/{}".to_string()]
+    );
+    assert_eq!(
+        serves(&a, "crate::cart"),
+        vec!["GET /api/carts/{}".to_string()],
+        "rocket's own spelling of a path variable"
+    );
+    assert_eq!(
+        serves(&a, "crate::legacy"),
+        vec!["GET /api/legacy".to_string()],
+        "`#[route(GET, …)]` states the verb as a bare token"
+    );
+    assert!(
+        requests(&a, "crate::main").is_empty() && serves(&a, "crate::main").is_empty(),
+        "an attribute carrying no path declares no route"
+    );
+}
+
+/// axum states the path, the verb and the handler in one call, and a method
+/// router chains several verbs onto one path.
+#[test]
+fn an_axum_router_names_the_handler_that_serves_it() {
+    let t = Tree::new("routesaxum");
+    t.write(
+        "src/lib.rs",
+        r#"
+pub async fn list() -> String { String::new() }
+pub async fn create() -> String { String::new() }
+
+pub fn app() -> Router {
+    Router::new()
+        .route("/api/orders", get(list).post(create))
+        .route("/api/health", get(|| async { "ok" }))
+}
+"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        serves(&a, "crate::list"),
+        vec!["GET /api/orders".to_string()],
+        "the handler is named, not the function that built the router"
+    );
+    assert_eq!(
+        serves(&a, "crate::create"),
+        vec!["POST /api/orders".to_string()],
+        "a method router chains a verb per link onto one path"
+    );
+    assert_eq!(
+        serves(&a, "crate::app"),
+        vec!["GET /api/health".to_string()],
+        "a closure has no name, so the function that registered it holds the route"
+    );
+}
+
+/// A client call hands its path to nobody and stays a request, which is the
+/// one fact that tells the two shapes apart.
+#[test]
+fn a_client_call_is_still_a_request() {
+    let t = Tree::new("routesclient");
+    t.write(
+        "src/lib.rs",
+        r#"
+pub async fn fetch(c: &Client, body: Body) { c.post("/api/orders", body).await; }
+"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        requests(&a, "crate::fetch"),
+        vec!["POST /api/orders".to_string()]
+    );
+    assert!(serves(&a, "crate::fetch").is_empty());
+}
+
+/// The account says what was declared, since a declaration is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_declarations_are_counted_in_the_report() {
+    let t = Tree::new("routesattrnote");
+    t.write("src/lib.rs", "#[get(\"/api/orders\")]\npub fn list() {}\n");
+    let a = run(&t);
+    assert!(
+        a.notes.iter().any(|n| n.contains("declared by a handler")),
+        "{:?}",
+        a.notes
+    );
+}

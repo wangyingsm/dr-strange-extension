@@ -184,10 +184,11 @@ pub struct FileFacts {
     /// one but not the other made the graph disagree with itself.
     #[serde(default)]
     derives: Vec<(String, String, u64)>,
-    /// The routes this file's functions ask for — a call argument shaped
-    /// like a path. Attached to the calling function in [`assemble`].
+    /// The routes this file's functions state — a call argument shaped like
+    /// a path. Split into the two sides in [`assemble`], where a handler's
+    /// name resolves.
     #[serde(default)]
-    requests: Vec<route::RouteRef>,
+    routes: Vec<Site>,
     /// `(owner key, attribute path as written, the whole attribute, line)` —
     /// `#[tokio::main]`, `#[get("/health")]`. The path is what the node is;
     /// the text rides on the edge, so `get` stays one node with a route per
@@ -966,7 +967,7 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
             .push((caller.to_string(), callee, idx, params));
     }
     for asked in &body.requests {
-        f.requests.push(asked.by(caller));
+        f.routes.push(asked.at(caller));
     }
 }
 
@@ -1250,18 +1251,40 @@ struct BodyFacts {
     requests: Vec<Asked>,
 }
 
-/// A route a body asks for, read before the body's own key is known: an
-/// impl method's key is this block's type plus its name, which only the
-/// walk outside the body can spell.
+/// One route a call states, read before the body's own key is known: an impl
+/// method's key is this block's type plus its name, which only the walk
+/// outside the body can spell.
+///
+/// `.route("/x", get(h))` and `client.get("/x")` are the same shape — a path
+/// in an argument — and what tells a declaration from a request is whether
+/// the path was handed to a **handler**: a registration hands it to someone,
+/// a client call does not.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Asked {
     verb: Option<route::Verb>,
     written: String,
     line: u64,
+    /// A handler written in place: a closure. A config value never is, which
+    /// is what keeps `client.get("/x", cfg)` a request.
+    #[serde(default)]
+    in_place: bool,
+    /// A handler named by a path, resolved at assemble by its last segment —
+    /// a declaration only when the name turns out to be a function this tree
+    /// declares.
+    #[serde(default)]
+    named: Option<String>,
 }
 
 impl Asked {
-    /// The record, once the symbol that asked for it is known.
+    /// This route on the symbol that stated it, once that key is known.
+    fn at(&self, symbol: &str) -> Site {
+        Site {
+            symbol: symbol.to_string(),
+            asked: self.clone(),
+        }
+    }
+
+    /// The comparable record, on whichever symbol the route belongs to.
     fn by(&self, symbol: &str) -> route::RouteRef {
         route::RouteRef {
             symbol: symbol.to_string(),
@@ -1270,6 +1293,13 @@ impl Asked {
             line: self.line,
         }
     }
+}
+
+/// One route a call states, keyed to the symbol the call sits in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Site {
+    symbol: String,
+    asked: Asked,
 }
 
 /// The path an expression states, if it states one: a string literal, or a
@@ -1298,6 +1328,128 @@ fn path_text(e: &syn::Expr) -> Option<String> {
         _ => return None,
     };
     route::looks_like_path(&text).then_some(text)
+}
+
+/// A call's argument list, the one type both call shapes carry.
+type Args = syn::punctuated::Punctuated<syn::Expr, syn::token::Comma>;
+
+/// What an argument list hands its path to: a closure written in place, or a
+/// path naming a function.
+///
+/// The last one wins, the way a registration's last argument is its handler.
+/// A local binding whose name collides with a function's is the cost of
+/// reading a name rather than a type — it resolves to that function, and a
+/// reader is shown the file and line to judge it by.
+fn handed<'a>(args: impl Iterator<Item = &'a syn::Expr>) -> (bool, Option<String>) {
+    let mut in_place = false;
+    let mut named = None;
+    let last_segment = |p: &syn::ExprPath| p.path.segments.last().map(|s| s.ident.to_string());
+    for a in args {
+        match a {
+            syn::Expr::Closure(_) => in_place = true,
+            syn::Expr::Path(p) => named = last_segment(p),
+            syn::Expr::Reference(r) => {
+                if let syn::Expr::Path(p) = &*r.expr {
+                    named = last_segment(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    (in_place, named)
+}
+
+/// The verb-and-handler pairs an axum method router states: `get(list)`, and
+/// `get(list).post(create)`, which is two routes on one path.
+fn method_router(e: &syn::Expr, out: &mut Vec<(route::Verb, bool, Option<String>)>) {
+    match e {
+        syn::Expr::MethodCall(m) => {
+            method_router(&m.receiver, out);
+            if let Some(verb) = route::Verb::from_name(&m.method.to_string()) {
+                let (in_place, named) = handed(m.args.iter());
+                out.push((verb, in_place, named));
+            }
+        }
+        syn::Expr::Call(c) => {
+            if let syn::Expr::Path(p) = &*c.func
+                && let Some(last) = p.path.segments.last()
+                && let Some(verb) = route::Verb::from_name(&last.ident.to_string())
+            {
+                let (in_place, named) = handed(c.args.iter());
+                out.push((verb, in_place, named));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Every path-shaped string literal an attribute's text holds.
+///
+/// Read from the argument rather than from a table of attribute names, the
+/// way a call's path is: `#[get("/orders")]` (actix), `#[get("/orders/<id>")]`
+/// (rocket) and `#[route(GET, uri = "/orders")]` are one rule.
+fn attr_paths(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        let literal = &after[..end];
+        if route::looks_like_path(literal) {
+            out.push(literal.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+/// The verbs an attribute states: the one its own path names, plus a bare
+/// uppercase method token.
+///
+/// `#[route(GET, uri = "/x")]` is the one shape where the attribute's own
+/// name does not say the verb, and it is how rocket writes a route that
+/// answers several.
+fn attr_verbs(path: &str, text: &str) -> Vec<Option<route::Verb>> {
+    let mut out: Vec<Option<route::Verb>> = Vec::new();
+    let last = path.rsplit("::").next().unwrap_or(path);
+    if let Some(verb) = route::Verb::from_name(last) {
+        out.push(Some(verb));
+    }
+    for token in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+        if token.len() < 3 || token.chars().any(|c| !c.is_ascii_uppercase()) {
+            continue;
+        }
+        let verb = route::Verb::from_name(token).map(Some);
+        if let Some(v) = verb
+            && !out.contains(&v)
+        {
+            out.push(v);
+        }
+    }
+    if out.is_empty() {
+        out.push(None);
+    }
+    out
+}
+
+/// The routes one attribute declares, on the item it sits on.
+fn attr_routes(owner: &str, path: &str, text: &str, line: u64) -> Vec<route::RouteRef> {
+    let paths = attr_paths(text);
+    if paths.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for verb in attr_verbs(path, text) {
+        for written in &paths {
+            out.push(route::RouteRef {
+                symbol: owner.to_string(),
+                verb,
+                written: written.clone(),
+                line,
+            });
+        }
+    }
+    out
 }
 
 /// The calls that run their argument somewhere else.
@@ -1335,26 +1487,47 @@ fn call_names(block: &syn::Block) -> BodyFacts {
         spawns: Vec<&'static str>,
     }
     impl Calls<'_> {
-        /// A call whose argument is shaped like a path is asking for a route
-        /// — whatever the callee is named.
+        /// A call whose argument is shaped like a path states a route —
+        /// whatever the callee is named.
         ///
-        /// Recognising the *argument* rather than a list of blessed clients
-        /// is what makes a project-local wrapper visible: `bridge("/check")`
+        /// Recognising the *argument* rather than a list of blessed crates is
+        /// what makes a project-local wrapper visible: `bridge("/check")`
         /// names no crate this reader could have been taught. The cost is
-        /// that an absolute file path can slip through; it will match no
-        /// declaration, and the account says how many did.
-        fn route_ref<'a>(
-            &mut self,
-            verb: Option<&syn::Ident>,
-            args: impl IntoIterator<Item = &'a syn::Expr>,
-            line: u64,
-        ) {
+        /// that an absolute file path can slip through; it will match nothing
+        /// on the other side, and the account says how many did.
+        ///
+        /// Which side the route is on is left for [`assemble`]: only a
+        /// resolved name tells a handler from a value the call happens to
+        /// take.
+        fn route_ref(&mut self, verb: Option<&syn::Ident>, args: &Args, line: u64) {
             let verb = verb.and_then(|v| route::Verb::from_name(&v.to_string()));
-            if let Some(written) = args.into_iter().find_map(path_text) {
+            let Some(written) = args.iter().find_map(path_text) else {
+                return;
+            };
+            // axum states the verb and the handler in a nested call, one per
+            // link: `.route("/x", get(list).post(create))`.
+            let mut routers = Vec::new();
+            for arg in args {
+                method_router(arg, &mut routers);
+            }
+            if routers.is_empty() {
+                let (in_place, named) = handed(args.iter());
                 self.facts.requests.push(Asked {
                     verb,
                     written,
                     line,
+                    in_place,
+                    named,
+                });
+                return;
+            }
+            for (verb, in_place, named) in routers {
+                self.facts.requests.push(Asked {
+                    verb: Some(verb),
+                    written: written.clone(),
+                    line,
+                    in_place,
+                    named,
                 });
             }
         }
@@ -2178,7 +2351,10 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut pending_fn_refs: Vec<(String, String, u64)> = Vec::new();
     // An impl method's routes, keyed here because only this walk can spell
     // `<type>::<name>`; a free function's are keyed in `collect_calls`.
-    let mut method_requests: Vec<route::RouteRef> = Vec::new();
+    let mut method_sites: Vec<Site> = Vec::new();
+    // Routes an attribute declares, on the item it sits on: `#[get("/x")]`
+    // names the handler by being written on it, so nothing is resolved.
+    let mut declared_routes: Vec<route::RouteRef> = Vec::new();
     // Closure typing: what each callable declares for its closure args
     // (types resolved in the DECLARING file's context), and where closures
     // were handed over.
@@ -2356,6 +2532,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             }
             impl_edges.push(e);
             annotations_recorded += 1;
+            declared_routes.extend(attr_routes(owner, path, text, *line));
         }
 
         // Every `use` becomes an edge to what it names. An import that lands
@@ -2512,7 +2689,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     pending_fn_refs.push((mkey.clone(), name.clone(), *line));
                 }
                 for asked in &m.requests {
-                    method_requests.push(asked.by(&mkey));
+                    method_sites.push(asked.at(&mkey));
                 }
                 // `Self` means this block's type, and only this block knows
                 // which — rewritten here for paths, returns and locals alike.
@@ -2550,6 +2727,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                         "Macro",
                         &mut external,
                     );
+                    declared_routes.extend(attr_routes(&mkey, path, text, m.line));
                     let mut e = edge_at(&mkey, &target, "ANNOTATED_BY", m.line);
                     if text != path {
                         e.props.insert(
@@ -3281,22 +3459,42 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     out.nodes
         .extend(external.into_values().filter(|n| !seen.contains(&n.key)));
 
-    // ---- the routes each function asks for --------------------------------
-    // On the function that makes the call, not a node of their own: a request
-    // and the declaration that serves it are matched when someone asks, and
-    // an edge drawn here would freeze a guess about which handler that is.
-    // Last, because a node written after this point would never be asked.
-    let asked = route::Routes::of(
-        route::Side::Requests,
-        files
-            .iter()
-            .flat_map(|f| &f.requests)
-            .chain(&method_requests),
-    );
+    // ---- the two halves, written on the symbols that state them -----------
+    // Which side a call is on is decided here and nowhere earlier: only a
+    // resolved name tells a handler from a value the call happens to take.
+    // Never a node or an edge of their own — a request and the declaration
+    // that serves it are matched when someone asks, and an edge drawn here
+    // would freeze a guess about which handler that is. Last, because a node
+    // written after this point is never asked.
+    let mut asked_refs: Vec<route::RouteRef> = Vec::new();
+    for site in files.iter().flat_map(|f| &f.routes).chain(&method_sites) {
+        let handler = site
+            .asked
+            .named
+            .as_deref()
+            .and_then(|name| fns.get(name))
+            .and_then(|cands| pick(&site.symbol, cands, &scopes))
+            .filter(|target| **target != site.symbol);
+        match handler {
+            // A registration hands the path to a handler, and that handler is
+            // the symbol serving it.
+            Some(target) => declared_routes.push(site.asked.by(target)),
+            // Written in place, so the symbol that registered it is the only
+            // one there is.
+            None if site.asked.in_place => declared_routes.push(site.asked.by(&site.symbol)),
+            // Nothing was handed anywhere: the call is asking.
+            None => asked_refs.push(site.asked.by(&site.symbol)),
+        }
+    }
+    let asked = route::Routes::of(route::Side::Requests, &asked_refs);
+    let served = route::Routes::of(route::Side::Serves, &declared_routes);
     let mut recorded = 0usize;
+    let mut declares = 0usize;
     for node in &mut out.nodes {
         recorded += asked.write(&node.key, &mut node.props);
+        declares += served.write(&node.key, &mut node.props);
     }
+    out.notes.extend(served.note(declares));
     out.notes.extend(asked.note(recorded));
 
     // Say what was not emitted, so a thin call graph is explained rather than
