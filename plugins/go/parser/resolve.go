@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/wangyingsm/dr-strange-extension/sdk/go/route"
 )
 
 // Assembled is the result: facts, and an account of what could not be done.
@@ -821,6 +823,33 @@ func Assemble(all []FileFacts) Assembled {
 			Label:       external[k],
 			ExtraLabels: []string{"External"},
 		})
+	}
+
+	// ---- the routes each function asks for --------------------------------
+	// On the function that makes the call, not a node of their own: a request
+	// and the declaration that serves it are matched when someone asks, and
+	// an edge drawn here would freeze a guess about which handler that is.
+	// Last, because a node written after this point would never be asked.
+	var refs []route.Ref
+	for _, f := range all {
+		refs = append(refs, f.Requests...)
+	}
+	asked := route.Of(route.Requests, refs)
+	recorded := 0
+	for at := range out.Nodes {
+		props := out.Nodes[at].Props
+		if props == nil {
+			props = Props{}
+		}
+		n := asked.Write(out.Nodes[at].Key, props)
+		if n == 0 {
+			continue
+		}
+		recorded += n
+		out.Nodes[at].Props = props
+	}
+	if note := asked.Note(recorded); note != "" {
+		out.Notes = append(out.Notes, note)
 	}
 
 	if unresolved > 0 {

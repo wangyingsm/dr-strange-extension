@@ -22,8 +22,11 @@ import (
 	"go/token"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/wangyingsm/dr-strange-extension/sdk/go/route"
 )
 
 // Files is what the parser reads through — the plugin contract's host, as
@@ -247,6 +250,10 @@ type FileFacts struct {
 	// Call sites too dynamic to name at all — `f()()`, chained selectors —
 	// counted so the notes can account for them.
 	Opaque int `json:"opaque,omitempty"`
+	// Requests are the routes this file's functions ask for — a call
+	// argument shaped like a path. Attached to the calling function in
+	// [Assemble].
+	Requests []route.Ref `json:"requests,omitempty"`
 }
 
 // ParseChunk parses one chunk of paths into per-file facts.
@@ -795,6 +802,7 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 		if !bare {
 			args = nil
 		}
+		w.routeRef(caller, call)
 		site := Call{Caller: caller, Line: w.line(call), Concurrent: spawned[call], Args: args}
 		switch fn := call.Fun.(type) {
 		case *ast.Ident:
@@ -812,6 +820,152 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 		}
 		return true
 	})
+}
+
+// routeRef records a route when one of a call's arguments is shaped like a
+// path — whatever the callee is named.
+//
+// Recognising the argument rather than a list of blessed clients is what
+// makes a project-local wrapper visible: `bridge("/check")` names no package
+// this reader could have been taught. The cost is that a file path can slip
+// through; it will match no declaration, and the account says how many did.
+func (w *walker) routeRef(caller string, call *ast.CallExpr) {
+	// A `Sprintf` builds the path the call around it asks for; reading it
+	// here as well would record the same route twice, once comparable and
+	// once with its verbs still in it.
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" {
+		return
+	}
+	// `http.Get(url)`, `client.Post(…)`: the verb is in the name when the
+	// client puts it there. `Do` and `ServeHTTP` put it nowhere.
+	verb := route.Any
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		if v, ok := route.FromName(fn.Name); ok {
+			verb = v
+		}
+	case *ast.SelectorExpr:
+		if v, ok := route.FromName(fn.Sel.Name); ok {
+			verb = v
+		}
+	}
+	written := ""
+	for _, arg := range call.Args {
+		if written == "" {
+			written = w.pathText(arg)
+		}
+		// `http.NewRequest("POST", url, body)` states the verb positionally,
+		// which is the one shape the callee's name hides.
+		if verb == route.Any {
+			if lit, ok := arg.(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				if text, err := strconv.Unquote(lit.Value); err == nil && isAlpha(text) {
+					if v, ok := route.FromName(text); ok {
+						verb = v
+					}
+				}
+			}
+		}
+	}
+	if written == "" {
+		return
+	}
+	w.facts.Requests = append(w.facts.Requests, route.Ref{
+		Symbol:  caller,
+		Verb:    verb,
+		Written: written,
+		Line:    uint64(w.line(call)),
+	})
+}
+
+// pathText is the path an expression states, if it states one: a string
+// literal, or a `fmt.Sprintf` whose verbs stand where a variable segment
+// does.
+//
+// A path assembled by `+` or `path.Join` is not a literal and states nothing
+// a parser is certain of.
+func (w *walker) pathText(e ast.Expr) string {
+	var text string
+	switch x := e.(type) {
+	case *ast.BasicLit:
+		if x.Kind != token.STRING {
+			return ""
+		}
+		unquoted, err := strconv.Unquote(x.Value)
+		if err != nil {
+			return ""
+		}
+		text = unquoted
+	case *ast.CallExpr:
+		sel, ok := x.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Sprintf" || len(x.Args) == 0 {
+			return ""
+		}
+		format := w.pathText(x.Args[0])
+		if format == "" {
+			return ""
+		}
+		text = holes(format)
+	case *ast.ParenExpr:
+		return w.pathText(x.X)
+	default:
+		return ""
+	}
+	if !route.LooksLikePath(text) {
+		return ""
+	}
+	return text
+}
+
+// holes rewrites a `fmt` format string's verbs as the convention's own hole,
+// so `/orders/%d` compares equal to a declaration's `/orders/{id}`.
+//
+// Rust's `format!("/orders/{id}")` needs no such step — its braces are
+// already the convention's. Go's verbs are not, and this is where that
+// knowledge belongs: in the plugin for the language that writes them, not in
+// the convention every language shares.
+func holes(format string) string {
+	var out strings.Builder
+	for i := 0; i < len(format); i++ {
+		if format[i] != '%' {
+			out.WriteByte(format[i])
+			continue
+		}
+		// `%%` is a literal percent, not a hole.
+		if i+1 < len(format) && format[i+1] == '%' {
+			out.WriteByte('%')
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(format) && strings.IndexByte("+-# 0123456789.*", format[j]) >= 0 {
+			j++
+		}
+		if j < len(format) && isLetter(format[j]) {
+			out.WriteString("${}")
+			i = j
+			continue
+		}
+		out.WriteByte('%')
+	}
+	return out.String()
+}
+
+func isLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// isAlpha reports whether every byte is an ASCII letter — what keeps
+// `application/json` in an argument list from being read as a verb.
+func isAlpha(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isLetter(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // chanMake reads `make(chan T, n)` off an initializer, returning the element

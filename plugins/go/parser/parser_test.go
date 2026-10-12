@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/json"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1242,4 +1243,117 @@ func TestRangeOverAMapTakesTheValueType(t *testing.T) {
 	if !hasEdge(a, "m.Build", "CALLS", "m.Rule.Check") {
 		t.Fatalf("a map's range value takes the value type: %v", a.Edges)
 	}
+}
+
+// ---- the routes a call asks for -------------------------------------------
+
+// requests reads the routes a function asks for, as the property records
+// them.
+func requests(t *testing.T, a Assembled, key string) []string {
+	t.Helper()
+	p, ok := node(t, a, key).Props["requests"]
+	if !ok {
+		return nil
+	}
+	return p.(map[string]any)["$value"].([]string)
+}
+
+// Every client spelling, and the one that matters most: a project-local
+// wrapper that names no package this reader could have been taught.
+func TestACallWithAPathArgumentAsksForARoute(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"c.go": `package m
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func viaGet() { http.Get("https://api.example.com/v1/orders?page=2") }
+
+func viaClient(c *http.Client, id int) {
+	c.Post(fmt.Sprintf("/api/orders/%d/items", id), "", nil)
+}
+
+func viaNewRequest(url string) {
+	http.NewRequest("DELETE", "/api/orders/1", nil)
+}
+
+func viaWrapper() { bridge("/bridge/check/1") }
+
+func viaRuntime(id int) { send(ordersBase() + fmt.Sprint(id)) }
+`,
+	}})
+	for _, c := range []struct {
+		key  string
+		want []string
+		why  string
+	}{
+		{"m.viaGet", []string{"GET /v1/orders"}, "an absolute URL and a query reduce to the path"},
+		{"m.viaClient", []string{"POST /api/orders/{}/items"}, "a `%d` stands where a variable segment does"},
+		{"m.viaNewRequest", []string{"DELETE /api/orders/1"}, "`NewRequest` states the verb positionally"},
+		{"m.viaWrapper", []string{"* /bridge/check/1"}, "the wrapper is visible because the argument is"},
+		{"m.viaRuntime", nil, "a path with no literal in it states nothing a parser is certain of"},
+	} {
+		got := requests(t, a, c.key)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s asks for %v, want %v — %s", c.key, got, c.want, c.why)
+		}
+	}
+}
+
+// The source's own spelling is kept beside the comparable form.
+func TestTheWrittenPathIsKeptBesideTheComparableOne(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"c.go": `package m
+
+import "fmt"
+
+func one(c Client, id int) { c.Get(fmt.Sprintf("/api/orders/%d", id)) }
+`,
+	}})
+	written := node(t, a, "m.one").Props["requests_as_written"].(map[string]any)["$value"].([]string)
+	if !reflect.DeepEqual(written, []string{"/api/orders/${}"}) {
+		t.Errorf("requests_as_written = %v", written)
+	}
+}
+
+// A string that is not path-shaped is not a route, and a function that asks
+// for nothing carries no property at all.
+func TestOnlyAPathShapedArgumentCounts(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"c.go": `package m
+
+func plain() { compute("orders", 2) }
+
+func logs() { println("a b c") }
+`,
+	}})
+	if got := requests(t, a, "m.plain"); got != nil {
+		t.Errorf("plain asks for %v", got)
+	}
+	if _, ok := node(t, a, "m.plain").Props["requests"]; ok {
+		t.Error("no property rather than an empty one")
+	}
+	if got := requests(t, a, "m.logs"); got != nil {
+		t.Errorf("logs asks for %v", got)
+	}
+}
+
+// The account says what was recorded, since a request is only half of a
+// route and the other half is matched later.
+func TestTheRequestsAreCountedInTheReport(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"c.go":   "package m\n\nfunc go_() { http.Get(\"/api/orders\") }\n",
+	}})
+	for _, n := range a.Notes {
+		if strings.Contains(n, "route(s) asked for") {
+			return
+		}
+	}
+	t.Errorf("no account of the routes recorded in %v", a.Notes)
 }
