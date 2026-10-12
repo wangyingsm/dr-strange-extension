@@ -60,6 +60,49 @@ cannot move where the graph says it starts.
 | `EXTENDS` | class → base — syntax, with a subscripted base extending what it subscripts (`Generic[T]` → `typing.Generic`) | class line |
 | `USES_TYPE` | declaration → a type it is **annotated with**, `role` on the edge (`field`, `param`, `return`). Subscripts, unions and string forward references are walked — `list[Job]` is a dependency on `Job`. **Only where an annotation was written**: an unannotated parameter states no type, and its silence is not the absence of a dependency | — |
 
+## Routes
+
+An HTTP route is the one reference this plugin cannot turn into an edge: the
+handler or the caller is in another language, often another repository, and
+between the two sides there is only a string. So the plugin records what the
+source *states* and leaves the match to drsg's `wire`, which computes it per
+call and never stores it.
+
+On the symbol that already exists:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the decorated function, or the view a URL conf names | `GET /api/orders/{}` — the verb, and the path with every variable segment reduced to `{}` |
+| `requests` | the function making the call | the same shape; `*` where the source states no verb |
+| `serves_as_written` / `requests_as_written` | both | the path exactly as the source wrote it, before normalising |
+
+**Declarations** come in both of Python's idioms. A decorator carrying a path
+records on the function below it — `@app.get("/x")`, `@router.post(...)`,
+`@app.route(...)` — with the verb read from the decorator's own name. And a
+URL conf records on the **view it names**: `path("orders/<int:pk>", views.one)`
+in a `urlpatterns` list puts the route on `views.one`, which is Django's shape
+and needs no decorator at all. A registry that is no router declares nothing.
+
+**Prefixes resolve further here than elsewhere**, because Django and FastAPI
+both state them away from the route:
+
+- `APIRouter(prefix="/api")` reaches every path stated through that router.
+- A prefix written as a **name** resolves across modules — `API_PREFIX` imported
+  from `app.config` is followed to its literal.
+- An `include()`d URL conf sits under the path that included it, and a router
+  included under a prefix is under **both**.
+
+**Requests** are any call with a path-shaped string argument, whatever the
+callee is called — `requests`, `httpx`, `urllib`, and a project-local wrapper
+alike. An f-string keeps its hole (`f"/orders/{pk}"` → `/orders/{}`), and an
+absolute URL or a query string reduces to the path. A `mock.patch` target is a
+qualified name, not a path, so it is not mistaken for one.
+
+**A view the tree cannot resolve keeps its route.** If `path("health/",
+elsewhere.check)` names something this plugin cannot bind, the route is
+recorded on the URL conf's own module rather than dropped — a fact that is
+still true, attached to the only symbol that is certain.
+
 ## Resolution — the certainty line
 
 - `from pkg.mod import name` binds through the module set, aliases included;
