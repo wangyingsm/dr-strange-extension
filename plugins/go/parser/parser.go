@@ -801,6 +801,7 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 		}
 		return true
 	})
+	prefixes := w.groupPrefixes(body)
 	ast.Inspect(body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
@@ -820,7 +821,7 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 		if !bare {
 			args = nil
 		}
-		w.routeRef(caller, call)
+		w.routeRef(caller, call, prefixes)
 		site := Call{Caller: caller, Line: w.line(call), Concurrent: spawned[call], Args: args}
 		switch fn := call.Fun.(type) {
 		case *ast.Ident:
@@ -840,6 +841,48 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 	})
 }
 
+// groupPrefixes reads the prefixes a body binds to names: `g :=
+// r.Group("/api")`, and `v1 := g.Group("/v1")` under it.
+//
+// Collected before the walk because the visit gives no parents — the same
+// reason the `go` statements above are — and in source order, so a group hung
+// on another group is under both. A group handed to another function travels
+// as a value, which is a dataflow question rather than a parse.
+func (w *walker) groupPrefixes(body *ast.BlockStmt) map[string]string {
+	prefixes := map[string]string{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		name, ok := as.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		call, ok := as.Rhs[0].(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || !route.Mounts(sel.Sel.Name) {
+			return true
+		}
+		for _, arg := range call.Args {
+			_, p, ok := pattern(w.literal(arg))
+			if !ok {
+				continue
+			}
+			if x, isName := sel.X.(*ast.Ident); isName {
+				p = route.Join(prefixes[x.Name], p)
+			}
+			prefixes[name.Name] = p
+			break
+		}
+		return true
+	})
+	return prefixes
+}
+
 // routeRef records a route when one of a call's arguments is shaped like a
 // path — whatever the callee is named.
 //
@@ -847,7 +890,7 @@ func (w *walker) calls(caller string, body *ast.BlockStmt) {
 // makes a project-local wrapper visible: `bridge("/check")` names no package
 // this reader could have been taught. The cost is that a file path can slip
 // through; it will match no declaration, and the account says how many did.
-func (w *walker) routeRef(caller string, call *ast.CallExpr) {
+func (w *walker) routeRef(caller string, call *ast.CallExpr, prefixes map[string]string) {
 	// A `Sprintf` builds the path the call around it asks for; reading it
 	// here as well would record the same route twice, once comparable and
 	// once with its verbs still in it.
@@ -913,6 +956,14 @@ func (w *walker) routeRef(caller string, call *ast.CallExpr) {
 	}
 	if written == "" {
 		return
+	}
+	// `g.GET("/orders", h)` states a path under whatever `g` was grouped on.
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if x, isName := sel.X.(*ast.Ident); isName {
+			if prefix, found := prefixes[x.Name]; found {
+				written = route.Join(prefix, written)
+			}
+		}
 	}
 	w.facts.Routes = append(w.facts.Routes, RouteSite{
 		Route: route.Ref{

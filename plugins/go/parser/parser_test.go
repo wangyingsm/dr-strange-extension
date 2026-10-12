@@ -1458,24 +1458,42 @@ func TestTheDeclarationsAreCountedInTheReport(t *testing.T) {
 	t.Errorf("no account of the routes declared in %v", a.Notes)
 }
 
-// A mount gives a router a prefix, and the function doing it serves nothing
-// and asks for nothing — gin's and echo's `Group` alike.
-func TestAMountStatesNoRouteOfItsOwn(t *testing.T) {
+// A group's prefix reaches every route hung on it, and nests — while the
+// function doing the grouping states no route of its own.
+func TestAGroupsPrefixReachesTheRoutesOnIt(t *testing.T) {
 	a := run(t, mapFiles{files: map[string]string{
 		"go.mod": "module m\n",
 		"main.go": `package m
 
 func List(w, r any) {}
 
+func Detail(w, r any) {}
+
+func Loose(w, r any) {}
+
 func routes(r any) {
 	g := r.Group("/api")
 	g.GET("/orders", List)
+	v1 := g.Group("/v1")
+	v1.POST("/orders/:id", Detail)
+	r.GET("/health", Loose)
 }
 `,
 	}})
-	if got := serves(t, a, "m.List"); !reflect.DeepEqual(got, []string{"GET /orders"}) {
-		t.Errorf("List serves %v, want the route without the prefix it is given later", got)
+	for _, c := range []struct {
+		key  string
+		want []string
+		why  string
+	}{
+		{"m.List", []string{"GET /api/orders"}, "the group's prefix joins the path"},
+		{"m.Detail", []string{"POST /api/v1/orders/{}"}, "a group hung on a group is under both"},
+		{"m.Loose", []string{"GET /health"}, "a route on the engine itself carries no prefix"},
+	} {
+		if got := serves(t, a, c.key); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s serves %v, want %v — %s", c.key, got, c.want, c.why)
+		}
 	}
+	// The grouping itself serves nothing and asks for nothing.
 	if got := requests(t, a, "m.routes"); got != nil {
 		t.Errorf("routes asks for %v", got)
 	}
