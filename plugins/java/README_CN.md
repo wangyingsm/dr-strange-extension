@@ -51,6 +51,36 @@ com.acme.core.Engine.Builder          嵌套类型经由外层串接
 | `ANNOTATED_BY` | 类型/方法 → 其注解——Spring 代码库里注解*就是*架构（`@Service`、`@Transactional`、`@GetMapping`）；`java.lang` 自带的记号（`@Override`、`@Deprecated`……）是噪音，不入图。边上的 `args` **照原样**记下参数（`@Qualifier("fast")`、`@PostMapping("/orders")`），不作解释：其含义归框架所有 | 注解处 |
 | `USES_TYPE` | 声明 → 为其**定型**的类型；`role` 记在边上（`field`、`param`、`return`），record 的组件计为字段。泛型参数会被走入——`List<Job>` 就是对 `Job` 的依赖——且只有本树声明的类型才成边。由容器注入的依赖另外带上 `injected` 与 `_injected_confidence`（见下） | — |
 
+## 路由
+
+HTTP 路由是本插件唯一无法变成边的引用：处理它或调用它的代码在另一种语言里，往往还
+在另一个仓库里，而两侧之间只有一个字符串。因此插件只记录源码所*声明*的内容，把匹配
+留给 drsg 的 `wire`——它在每次调用时计算，从不存储。
+
+记录在本就存在的那个符号上：
+
+| 属性 | 记录在 | 形式 |
+|---|---|---|
+| `serves` | 处理方法，以及与之组合的那个类的映射 | `GET /api/orders/{}`——动词，加上把每个可变段都归约为 `{}` 的路径 |
+| `requests` | 发起调用的方法 | 同一形式；源码未声明动词时记为 `*` |
+| `serves_as_written` / `requests_as_written` | 两者 | 归一化之前、源码原样写出的那个路径 |
+
+**声明**来自插件本就连参数一起原样捕获的注解。类上的
+`@RequestMapping("/bridge")` 会与方法上的 `@GetMapping("/check/{id}")` 组合；
+动词则从注解自己的名字里读出——`GetMapping`、`POST`、`HttpGet`——无论框架把这个动词
+词放在哪里，因此 Spring、JAX-RS（`@Path` + `@GET`）与 Micronaut（`@Controller` +
+`@Get`）都不需要另立一张表。**没有**声明动词的映射记为 `*`，它会匹配该路径上的所有
+动词，并且回答里会把这一点说出来：拒绝它就等于拒绝 Spring 自己的 `@RequestMapping`。
+
+**请求**是任何带有形如路径的字符串参数的调用，无论被调用方叫什么——`RestTemplate`、
+`WebClient`、`HttpClient`，以及项目内自己包的那一层，都一样。绝对 URL 或查询串会
+归约为路径。
+
+**声明式客户端什么也不声明。** `@HttpExchange` / `@GetExchange`（以及
+`@FeignClient`）看起来和控制器一模一样，含义却相反：那个接口是在*请求*这个路径，
+而不是提供它。在那里记录 `serves` 等于凭空造出一个并不存在的处理器，因此插件目前
+两侧都不记录，而不是记错一侧。
+
 ## 解析——按 javac 的方式读引用
 
 顺序：**照原样已限定** → **同包**（无需 import——这是语言自己的规则）→
@@ -162,3 +192,7 @@ Spring 相关的边：`@ComponentScan`、`@Profile` 与 `@ConditionalOn*` 一族
 lambda 的参数没有类型，故 `handlers.forEach(h -> h.handle())` 仍未解析，而
 `for (Handler h : handlers)` 可以解析。`Optional<Port>` 与
 `ObjectProvider<Port>` 的注入解析不过包装类型本身。
+
+路由方面：servlet 的 context path 与网关的重写属于部署配置，因此声明按源码所写
+记录，而请求实际携带的前缀在这里并不知道。声明式客户端（`@FeignClient`、
+`@HttpExchange`）两侧都不记录，而不是记为 `requests`——这是下一步要补的。

@@ -54,6 +54,42 @@ cannot move where the graph says it starts.
 | `ANNOTATED_BY` | type/method → its annotations — on a Spring codebase the annotations *are* the architecture (`@Service`, `@Transactional`, `@GetMapping`); `java.lang`'s own markers (`@Override`, `@Deprecated`, …) are noise and stay out. `args` on the edge carries the arguments **as written** (`@Qualifier("fast")`, `@PostMapping("/orders")`), uninterpreted: what they mean is the framework's business | annotation site |
 | `USES_TYPE` | declaration → a type it is **typed by**, `role` on the edge (`field`, `param`, `return`), a record's components counted as fields. Generic arguments are walked — `List<Job>` is a dependency on `Job` — and only types this tree declares get an edge. A dependency a container wires also carries `injected` and `_injected_confidence` (below) | — |
 
+## Routes
+
+An HTTP route is the one reference this plugin cannot turn into an edge: the
+handler or the caller is in another language, often another repository, and
+between the two sides there is only a string. So the plugin records what the
+source *states* and leaves the match to drsg's `wire`, which computes it per
+call and never stores it.
+
+On the symbol that already exists:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the handler method, and the class whose mapping it composes with | `GET /api/orders/{}` — the verb, and the path with every variable segment reduced to `{}` |
+| `requests` | the method making the call | the same shape; `*` where the source states no verb |
+| `serves_as_written` / `requests_as_written` | both | the path exactly as the source wrote it, before normalising |
+
+**Declarations** come from the annotations the plugin already captures with
+their arguments as written. A class-level `@RequestMapping("/bridge")`
+composes with a method's `@GetMapping("/check/{id}")`, and the verb is read
+from the annotation's own name — `GetMapping`, `POST`, `HttpGet` — wherever
+the framework puts the verb word, so Spring, JAX-RS (`@Path` + `@GET`) and
+Micronaut (`@Controller` + `@Get`) need no separate table. A mapping that
+states **no** verb records `*`, which matches every verb on that path and says
+so in the answer: refusing it would refuse Spring's own `@RequestMapping`.
+
+**Requests** are any call with a path-shaped string argument, whatever the
+callee is called — `RestTemplate`, `WebClient`, `HttpClient`, and a
+project-local wrapper alike. An absolute URL or a query string reduces to the
+path.
+
+**A declarative client declares nothing.** `@HttpExchange` / `@GetExchange`
+(and `@FeignClient`) look exactly like a controller and mean the opposite: the
+interface *asks for* the path, it does not serve it. Recording `serves` there
+would invent a handler that does not exist, so the plugin records neither side
+for now rather than the wrong one.
+
 ## Resolution — reading references the way javac does
 
 In order: **already-qualified as written** → **same package** (no import
@@ -188,3 +224,9 @@ names differ the type alone decides and the `@Qualifier` is not carried over.
 A lambda's parameter is untyped, so `handlers.forEach(h -> h.handle())` stays
 unresolved where `for (Handler h : handlers)` resolves. `Optional<Port>` and
 `ObjectProvider<Port>` injection resolves no further than the wrapper.
+
+Routes: a servlet context path and a gateway's rewrite are deployment
+configuration, so a declaration is recorded as the source states it and the
+prefix the request actually carries is not known here. A declarative client
+(`@FeignClient`, `@HttpExchange`) is recorded as neither side rather than as a
+`requests`, which is the next thing to add.
