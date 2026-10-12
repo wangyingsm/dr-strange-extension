@@ -74,6 +74,11 @@
 //! on `HashMap` iteration order would make a plugin's facts depend on its own
 //! internals rather than on what it read.
 
+/// The HTTP route convention — a vocabulary rather than a format reader, and
+/// the one thing every language's plugin has to agree on before a request can
+/// be matched to the declaration that serves it.
+pub mod route;
+
 /// The generated bindings.
 ///
 /// Public because `export_plugin!` expands to paths inside it. Most plugins
