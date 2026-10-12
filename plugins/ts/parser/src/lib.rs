@@ -18,6 +18,7 @@ mod resolve;
 
 pub use resolve::{Assembled, assemble};
 
+use dr_strange_ext::route;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -241,6 +242,24 @@ pub struct FileFacts {
     /// class — `Promise<T>` unwraps to `T`, which is what an async factory
     /// hands the awaiter.
     pub returns: Vec<(String, String)>,
+    /// The routes this file's functions ask for — a call argument shaped like
+    /// a path. Attached to the calling function in [`assemble`].
+    #[serde(default)]
+    pub requests: Vec<RouteRef>,
+}
+
+/// One route a call asks for, as the source wrote it.
+///
+/// The path is kept unnormalised here: a reader wants the text that is in the
+/// file, and the comparable form is derived from it at assemble.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteRef {
+    pub caller: String,
+    /// The verb the callee's own name carries — `None` when it carries none,
+    /// which a project-local `request()` wrapper never does.
+    pub verb: Option<String>,
+    pub written: String,
+    pub line: u64,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -1745,6 +1764,34 @@ struct CallCollector<'a, 'b> {
 ///
 /// `all`/`race` are matched only under `Promise`, because a method called
 /// `all` on anything else schedules nothing.
+/// The path an expression states, if it states one: a string literal, or a
+/// template whose holes are left as `${}` for the convention to reduce.
+///
+/// A template is the common way a path carries an id — `` `/orders/${id}` ``
+/// — and keeping the hole rather than dropping it is what lets the result
+/// compare equal to a declaration's `/orders/{id}`.
+fn path_text(expr: &ast::Expr) -> Option<String> {
+    match expr {
+        ast::Expr::Lit(ast::Lit::Str(s)) => {
+            let text = s.value.to_atom_lossy().to_string();
+            route::looks_like_path(&text).then_some(text)
+        }
+        ast::Expr::Tpl(tpl) => {
+            let mut out = String::new();
+            for (i, quasi) in tpl.quasis.iter().enumerate() {
+                out.push_str(&quasi.raw);
+                if i < tpl.exprs.len() {
+                    out.push_str("${}");
+                }
+            }
+            route::looks_like_path(&out).then_some(out)
+        }
+        ast::Expr::Paren(p) => path_text(&p.expr),
+        ast::Expr::TsAs(a) => path_text(&a.expr),
+        _ => None,
+    }
+}
+
 fn schedules(callee: &ast::Expr) -> bool {
     match callee {
         ast::Expr::Ident(i) => matches!(
@@ -1797,6 +1844,71 @@ impl CallCollector<'_, '_> {
             name,
             line,
         });
+    }
+
+    /// A call whose argument is shaped like a path is asking for a route —
+    /// whatever the callee is named.
+    ///
+    /// Recognising the *argument* rather than a list of blessed clients is
+    /// what makes a project-local wrapper visible: `request('/bridge/check')`
+    /// names no library this reader could have been taught. The cost is that
+    /// a router push or a file path can slip through; it will match no
+    /// declaration, and the account says how many did.
+    fn route_ref(&mut self, node: &ast::CallExpr) {
+        let ast::Callee::Expr(callee) = &node.callee else {
+            return;
+        };
+        // `axios.get(…)`, `$http.post(…)`, `fetch(…)`: the verb is in the
+        // name when the client puts it there.
+        let mut verb = match &**callee {
+            ast::Expr::Member(m) => m
+                .prop
+                .as_ident()
+                .and_then(|p| route::Verb::from_name(&p.sym)),
+            ast::Expr::Ident(i) => route::Verb::from_name(&i.sym),
+            _ => None,
+        };
+        let mut written = None;
+        for arg in &node.args {
+            match &*arg.expr {
+                // A config object states both: `{ url: '/x', method: 'post' }`.
+                ast::Expr::Object(obj) => {
+                    for prop in &obj.props {
+                        let ast::PropOrSpread::Prop(p) = prop else {
+                            continue;
+                        };
+                        let ast::Prop::KeyValue(kv) = &**p else {
+                            continue;
+                        };
+                        let Some(name) = prop_name(&kv.key) else {
+                            continue;
+                        };
+                        match name.as_str() {
+                            "url" | "uri" => {
+                                written = written.or_else(|| path_text(&kv.value));
+                            }
+                            "method" => {
+                                if let ast::Expr::Lit(ast::Lit::Str(s)) = &*kv.value {
+                                    let m = s.value.to_atom_lossy().to_string();
+                                    verb = verb.or_else(|| route::Verb::from_name(&m));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                other => written = written.or_else(|| path_text(other)),
+            }
+        }
+        if let Some(written) = written {
+            let line = self.walker.line(node.span);
+            self.walker.facts.requests.push(RouteRef {
+                caller: self.caller.clone(),
+                verb: verb.map(|v| v.as_str().to_string()),
+                written,
+                line,
+            });
+        }
     }
 }
 
@@ -1862,6 +1974,7 @@ impl Visit for CallCollector<'_, '_> {
                 self.stamp(&a.expr, Shape::Scheduled);
             }
         }
+        self.route_ref(node);
         if let ast::Callee::Expr(expr) = &node.callee {
             match &**expr {
                 ast::Expr::Ident(i) => {

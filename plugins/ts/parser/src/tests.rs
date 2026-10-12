@@ -1107,3 +1107,141 @@ fn annotated_types_become_uses_type_edges() {
         assert!(!e.dst.ends_with("Map"), "a foreign type is nobody's edge");
     }
 }
+
+// ---- the routes a call asks for -------------------------------------------
+
+/// The routes a function asks for, as the property records them.
+fn requests(a: &Assembled, key: &str) -> Vec<String> {
+    node(a, key)
+        .props
+        .get("requests")
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Every client spelling, and the one that matters most: a project-local
+/// wrapper that names no library this reader could have been taught.
+#[test]
+fn a_call_with_a_path_argument_asks_for_a_route() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            r#"
+        import axios from 'axios';
+        export function viaAxios(id: string) { return axios.get(`/api/orders/${id}`); }
+        export function viaFetch() { return fetch('/api/orders'); }
+        export function viaConfig() { return axios({ url: '/api/orders', method: 'post' }); }
+        export function viaWrapper() { return request('/bridge/check/1'); }
+        export function viaMember(id: number) { return this.$http.delete('/api/orders/' + id); }
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/api.viaAxios"),
+        vec!["GET /api/orders/{}".to_string()]
+    );
+    assert_eq!(
+        requests(&a, "web/src/api.viaFetch"),
+        vec!["* /api/orders".to_string()],
+        "fetch names no verb, and `*` is what that means"
+    );
+    assert_eq!(
+        requests(&a, "web/src/api.viaConfig"),
+        vec!["POST /api/orders".to_string()],
+        "a config object states both"
+    );
+    assert_eq!(
+        requests(&a, "web/src/api.viaWrapper"),
+        vec!["* /bridge/check/1".to_string()],
+        "the wrapper is visible because the argument is"
+    );
+}
+
+/// A template's hole is kept, which is what lets it compare equal to a
+/// declaration's `{id}`.
+#[test]
+fn a_template_path_keeps_its_hole() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            "export function one(id: string) { return fetch(`/api/orders/${id}/items`); }",
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/api.one"),
+        vec!["* /api/orders/{}/items".to_string()]
+    );
+    let written = node(&a, "web/src/api.one").props["requests_as_written"]["$value"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        written, "/api/orders/${}/items",
+        "the source's own spelling"
+    );
+}
+
+/// An absolute URL names the same route as the path inside it, and a query
+/// says nothing about which handler serves it.
+#[test]
+fn an_absolute_url_and_a_query_reduce_to_the_path() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            "export function go() { return fetch('https://api.example.com/v1/orders?page=2'); }",
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/api.go"),
+        vec!["* /v1/orders".to_string()]
+    );
+}
+
+/// A string that is not path-shaped is not a route, and a function that asks
+/// for nothing carries no property at all.
+#[test]
+fn only_a_path_shaped_argument_counts() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            r#"
+        export function plain() { return compute('orders', 2); }
+        export function logs() { console.log('a b c'); }
+        "#,
+        ),
+    ]));
+    assert!(requests(&a, "web/src/api.plain").is_empty());
+    assert!(requests(&a, "web/src/api.logs").is_empty());
+    assert!(
+        !node(&a, "web/src/api.plain").props.contains_key("requests"),
+        "no property rather than an empty one"
+    );
+}
+
+/// The account says what was recorded, since a request is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_requests_are_counted_in_the_report() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            "export function go() { return fetch('/api/orders'); }",
+        ),
+    ]));
+    assert!(
+        a.notes.iter().any(|n| n.contains("route(s) asked for")),
+        "{:?}",
+        a.notes
+    );
+}
