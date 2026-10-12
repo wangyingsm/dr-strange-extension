@@ -16,6 +16,10 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# The route convention (`dr_strange_ext::route`) — one definition of what a
+# declaration and a request compare against, shared with every other plugin.
+# The SDK is otherwise the component's dependency, not the parser's.
+dr-strange-ext = { path = "../../../sdk/rust" }
 
 [workspace]
 members = []

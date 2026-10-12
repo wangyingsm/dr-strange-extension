@@ -3269,3 +3269,151 @@ fn a_closure_body_that_chains_through_its_own_hop_ends_on_the_budget() {
         "a spent budget names itself as the reason"
     );
 }
+
+// ---- the routes a call asks for -------------------------------------------
+
+/// One of the two route properties, as it records them.
+fn routes(a: &Assembled, key: &str, name: &str) -> Vec<String> {
+    a.nodes
+        .iter()
+        .find(|n| n.key == key)
+        .unwrap_or_else(|| panic!("no node {key} in {:?}", keys(a)))
+        .props
+        .get(name)
+        .and_then(|v| v.get("$value"))
+        .and_then(|v| v.as_array())
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The routes a function asks for, in the comparable form.
+fn requests(a: &Assembled, key: &str) -> Vec<String> {
+    routes(a, key, "requests")
+}
+
+/// Every client spelling, and the one that matters most: a project-local
+/// wrapper that names no crate this reader could have been taught.
+#[test]
+fn a_call_with_a_path_argument_asks_for_a_route() {
+    let t = Tree::new("routes");
+    t.write(
+        "src/lib.rs",
+        r#"
+pub fn via_reqwest() { reqwest::blocking::get("https://api.example.com/v1/orders?page=2"); }
+pub fn via_builder(c: &Client, id: u32) { c.post(&format!("/api/orders/{id}/items")); }
+pub fn via_wrapper() { bridge("/bridge/check/1"); }
+pub fn via_runtime(id: u32) { send(&(orders_base() + &id.to_string())); }
+pub struct Api;
+impl Api {
+    pub fn via_method(&self) { self.http.delete("/api/orders/{id}"); }
+}
+"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        requests(&a, "crate::via_reqwest"),
+        vec!["GET /v1/orders".to_string()],
+        "an absolute URL and a query reduce to the path"
+    );
+    assert_eq!(
+        requests(&a, "crate::via_builder"),
+        vec!["POST /api/orders/{}/items".to_string()],
+        "a `format!` hole is already the convention's hole"
+    );
+    assert_eq!(
+        requests(&a, "crate::via_wrapper"),
+        vec!["* /bridge/check/1".to_string()],
+        "the wrapper is visible because the argument is"
+    );
+    assert!(
+        requests(&a, "crate::via_runtime").is_empty(),
+        "a path with no literal in it states nothing a parser is certain of"
+    );
+    assert_eq!(
+        requests(&a, "crate::Api::via_method"),
+        vec!["DELETE /api/orders/{}".to_string()],
+        "an impl method is keyed where its type is known"
+    );
+}
+
+/// The source's own spelling is kept beside the comparable form.
+#[test]
+fn the_written_path_is_kept_beside_the_comparable_one() {
+    let t = Tree::new("routeswritten");
+    t.write(
+        "src/lib.rs",
+        r#"pub fn one(c: &Client, id: u32) { c.get(&format!("/api/orders/{id}")); }"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        routes(&a, "crate::one", "requests_as_written"),
+        vec!["/api/orders/{id}".to_string()],
+        "Rust writes the name in the hole, and it is kept"
+    );
+}
+
+/// A string that is not path-shaped is not a route, and a function that asks
+/// for nothing carries no property at all.
+#[test]
+fn only_a_path_shaped_argument_counts() {
+    let t = Tree::new("routesnone");
+    t.write(
+        "src/lib.rs",
+        r#"
+pub fn plain() { compute("orders", 2); }
+pub fn logs() { log("a b c"); }
+"#,
+    );
+    let a = run(&t);
+    assert!(requests(&a, "crate::plain").is_empty());
+    assert!(requests(&a, "crate::logs").is_empty());
+    assert!(
+        !a.nodes
+            .iter()
+            .find(|n| n.key == "crate::plain")
+            .unwrap()
+            .props
+            .contains_key("requests"),
+        "no property rather than an empty one"
+    );
+}
+
+/// The account says what was recorded, since a request is only half of a
+/// route and the other half is matched later.
+#[test]
+fn the_requests_are_counted_in_the_report() {
+    let t = Tree::new("routesnote");
+    t.write(
+        "src/lib.rs",
+        r#"pub fn go(c: &Client) { c.get("/api/orders"); }"#,
+    );
+    let a = run(&t);
+    assert!(
+        a.notes.iter().any(|n| n.contains("route(s) asked for")),
+        "{:?}",
+        a.notes
+    );
+}
+
+/// The limit this shape carries, stated where it bites hardest: a
+/// path-shaped literal is a route reference whatever the callee is named, so
+/// a filesystem path is recorded too. It matches no declaration and is
+/// counted — a named miss rather than a wrong edge.
+#[test]
+fn a_filesystem_path_is_recorded_and_will_match_nothing() {
+    let t = Tree::new("routesfs");
+    t.write(
+        "src/lib.rs",
+        r#"pub fn load() { std::fs::read_to_string("/etc/app/config.toml"); }"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        requests(&a, "crate::load"),
+        vec!["* /etc/app/config.toml".to_string()],
+        "recorded, because only the argument's shape was read"
+    );
+}

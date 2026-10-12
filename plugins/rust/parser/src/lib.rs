@@ -37,6 +37,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use dr_strange_ext::route;
 use quote::ToTokens;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -183,6 +184,10 @@ pub struct FileFacts {
     /// one but not the other made the graph disagree with itself.
     #[serde(default)]
     derives: Vec<(String, String, u64)>,
+    /// The routes this file's functions ask for — a call argument shaped
+    /// like a path. Attached to the calling function in [`assemble`].
+    #[serde(default)]
+    requests: Vec<route::RouteRef>,
     /// `(owner key, attribute path as written, the whole attribute, line)` —
     /// `#[tokio::main]`, `#[get("/health")]`. The path is what the node is;
     /// the text rides on the edge, so `get` stays one node with a route per
@@ -867,6 +872,7 @@ fn walk_impl(im: &syn::ItemImpl, parent: &str, include_source: bool, f: &mut Fil
                         insts: body.insts,
                         fn_refs: body.fn_refs,
                         closures: body.closures,
+                        requests: body.requests,
                         closure_sigs: closure_sig(&m.sig),
                         ret: ret_written(&m.sig),
                         param_types: sig_params(&m.sig),
@@ -937,6 +943,9 @@ struct ImplMethod {
     annotations: Vec<(String, String)>,
     /// The body's type-known locals, for its method calls.
     locals: Vec<(String, LocalHint)>,
+    /// The routes this method's calls ask for.
+    #[serde(default)]
+    requests: Vec<Asked>,
 }
 
 /// Record every call and struct literal this body holds, for later
@@ -955,6 +964,9 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
     for (callee, idx, params) in body.closures {
         f.closure_uses
             .push((caller.to_string(), callee, idx, params));
+    }
+    for asked in &body.requests {
+        f.requests.push(asked.by(caller));
     }
 }
 
@@ -1233,6 +1245,59 @@ struct BodyFacts {
     /// `(callee, argument index, closure param names)` — closures whose
     /// parameters the callee's signature may type.
     closures: Vec<(ClosureCallee, usize, Vec<ClosureParam>)>,
+    /// The routes this body's calls ask for, each still waiting for the key
+    /// of the function that holds them.
+    requests: Vec<Asked>,
+}
+
+/// A route a body asks for, read before the body's own key is known: an
+/// impl method's key is this block's type plus its name, which only the
+/// walk outside the body can spell.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Asked {
+    verb: Option<route::Verb>,
+    written: String,
+    line: u64,
+}
+
+impl Asked {
+    /// The record, once the symbol that asked for it is known.
+    fn by(&self, symbol: &str) -> route::RouteRef {
+        route::RouteRef {
+            symbol: symbol.to_string(),
+            verb: self.verb,
+            written: self.written.clone(),
+            line: self.line,
+        }
+    }
+}
+
+/// The path an expression states, if it states one: a string literal, or a
+/// `format!` whose holes the convention already reads as holes.
+///
+/// `format!("/orders/{id}")` is how Rust writes a path carrying an id, and
+/// its braces are the same braces `normalize` reduces — so the format string
+/// itself is the comparable text, with nothing to translate. A path built by
+/// `push_str` or `+` is not a literal and states nothing a parser is certain
+/// of.
+fn path_text(e: &syn::Expr) -> Option<String> {
+    let text = match e {
+        syn::Expr::Lit(l) => match &l.lit {
+            syn::Lit::Str(s) => s.value(),
+            _ => return None,
+        },
+        syn::Expr::Macro(m) => {
+            if m.mac.path.segments.last()?.ident != "format" {
+                return None;
+            }
+            let first = m.mac.tokens.clone().into_iter().next()?;
+            syn::parse2::<syn::LitStr>(first.into()).ok()?.value()
+        }
+        syn::Expr::Reference(r) => return path_text(&r.expr),
+        syn::Expr::Paren(p) => return path_text(&p.expr),
+        _ => return None,
+    };
+    route::looks_like_path(&text).then_some(text)
 }
 
 /// The calls that run their argument somewhere else.
@@ -1270,6 +1335,30 @@ fn call_names(block: &syn::Block) -> BodyFacts {
         spawns: Vec<&'static str>,
     }
     impl Calls<'_> {
+        /// A call whose argument is shaped like a path is asking for a route
+        /// — whatever the callee is named.
+        ///
+        /// Recognising the *argument* rather than a list of blessed clients
+        /// is what makes a project-local wrapper visible: `bridge("/check")`
+        /// names no crate this reader could have been taught. The cost is
+        /// that an absolute file path can slip through; it will match no
+        /// declaration, and the account says how many did.
+        fn route_ref<'a>(
+            &mut self,
+            verb: Option<&syn::Ident>,
+            args: impl IntoIterator<Item = &'a syn::Expr>,
+            line: u64,
+        ) {
+            let verb = verb.and_then(|v| route::Verb::from_name(&v.to_string()));
+            if let Some(written) = args.into_iter().find_map(path_text) {
+                self.facts.requests.push(Asked {
+                    verb,
+                    written,
+                    line,
+                });
+            }
+        }
+
         /// Record a call, carrying whatever it runs under, and fold it into
         /// any earlier call to the same callee: first line wins, departures
         /// union.
@@ -1285,6 +1374,13 @@ fn call_names(block: &syn::Block) -> BodyFacts {
     impl<'ast> Visit<'ast> for Calls<'_> {
         fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
             let mut spawner = None;
+            // `reqwest::get("…")`: the verb is the callee's last segment when
+            // the client puts it there, and nothing when it does not.
+            let named = match &*node.func {
+                syn::Expr::Path(p) => p.path.segments.last().map(|l| &l.ident),
+                _ => None,
+            };
+            self.route_ref(named, &node.args, line_of(node));
             if let syn::Expr::Path(p) = &*node.func
                 && let Some(last) = p.path.segments.last()
             {
@@ -1321,6 +1417,7 @@ fn call_names(block: &syn::Block) -> BodyFacts {
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let spawner = spawner_shape(&node.method.to_string());
+            self.route_ref(Some(&node.method), &node.args, line_of(node));
             self.note(Call {
                 name: node.method.to_string(),
                 path: None,
@@ -2079,6 +2176,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut pending_insts: Vec<(String, String, u64)> = Vec::new();
     // Functions passed as values, caller-attributed.
     let mut pending_fn_refs: Vec<(String, String, u64)> = Vec::new();
+    // An impl method's routes, keyed here because only this walk can spell
+    // `<type>::<name>`; a free function's are keyed in `collect_calls`.
+    let mut method_requests: Vec<route::RouteRef> = Vec::new();
     // Closure typing: what each callable declares for its closure args
     // (types resolved in the DECLARING file's context), and where closures
     // were handed over.
@@ -2410,6 +2510,9 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 }
                 for (name, line) in &m.fn_refs {
                     pending_fn_refs.push((mkey.clone(), name.clone(), *line));
+                }
+                for asked in &m.requests {
+                    method_requests.push(asked.by(&mkey));
                 }
                 // `Self` means this block's type, and only this block knows
                 // which — rewritten here for paths, returns and locals alike.
@@ -3177,6 +3280,24 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     // stand-in carrying its key would replace it.
     out.nodes
         .extend(external.into_values().filter(|n| !seen.contains(&n.key)));
+
+    // ---- the routes each function asks for --------------------------------
+    // On the function that makes the call, not a node of their own: a request
+    // and the declaration that serves it are matched when someone asks, and
+    // an edge drawn here would freeze a guess about which handler that is.
+    // Last, because a node written after this point would never be asked.
+    let asked = route::Routes::of(
+        route::Side::Requests,
+        files
+            .iter()
+            .flat_map(|f| &f.requests)
+            .chain(&method_requests),
+    );
+    let mut recorded = 0usize;
+    for node in &mut out.nodes {
+        recorded += asked.write(&node.key, &mut node.props);
+    }
+    out.notes.extend(asked.note(recorded));
 
     // Say what was not emitted, so a thin call graph is explained rather than
     // taken for the whole truth.
