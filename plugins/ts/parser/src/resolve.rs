@@ -5,7 +5,7 @@
 //! boundaries fell, and does not: everything keys on file-order-stable
 //! indexes, never on how the facts were batched.
 
-use crate::{CallKind, EXTENSIONS, Edge, FileFacts, Handler, Node, Props, Shape, edge_at};
+use crate::{Base, CallKind, EXTENSIONS, Edge, FileFacts, Handler, Node, Props, Shape, edge_at};
 use dr_strange_ext::route;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -942,10 +942,62 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         .filter(|n| matches!(n.label.as_str(), "Function" | "Method"))
         .map(|n| n.key.clone())
         .collect();
+    // A client's base path, by the module that built it: `api.get('/orders')`
+    // states a path relative to whatever `api` was created with, and the two
+    // are usually in different files.
+    let mut literals: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for f in &all {
+        let m = literals.entry(f.module_id.as_str()).or_default();
+        for (name, value) in &f.literals {
+            m.insert(name.as_str(), value.as_str());
+        }
+    }
+    let mut bases: BTreeMap<&str, BTreeMap<&str, &str>> = BTreeMap::new();
+    for f in &all {
+        for (name, base) in &f.bases {
+            let resolved = match base {
+                Base::Literal(text) => Some(text.as_str()),
+                // A base written as a name: this module's own constant, or
+                // one it imported.
+                Base::Named(written) => literals
+                    .get(f.module_id.as_str())
+                    .and_then(|m| m.get(written.as_str()).copied())
+                    .or_else(|| {
+                        let b = file_bindings(f);
+                        let (imported, spec) = b.get(written.as_str())?;
+                        let Resolved::Module(target) = ix.resolve_spec(&f.file, spec) else {
+                            return None;
+                        };
+                        literals.get(target.as_str())?.get(*imported).copied()
+                    }),
+            };
+            if let Some(resolved) = resolved {
+                bases
+                    .entry(f.module_id.as_str())
+                    .or_default()
+                    .insert(name.as_str(), resolved);
+            }
+        }
+    }
     let mut asked_refs: Vec<route::RouteRef> = Vec::new();
     let mut served_refs: Vec<route::RouteRef> = Vec::new();
     for f in &all {
         let bindings = file_bindings(f);
+        // The base a receiver carries: built in this module, or imported from
+        // the one that built it.
+        let base_of = |name: &str| -> Option<&str> {
+            if let Some(found) = bases
+                .get(f.module_id.as_str())
+                .and_then(|m| m.get(name).copied())
+            {
+                return Some(found);
+            }
+            let (imported, spec) = bindings.get(name)?;
+            let Resolved::Module(target) = ix.resolve_spec(&f.file, spec) else {
+                return None;
+            };
+            bases.get(target.as_str())?.get(*imported).copied()
+        };
         for site in &f.routes {
             let handler = match &site.handler {
                 // A registration hands the path to a handler, and that
@@ -957,13 +1009,17 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 Some(Handler::InPlace) => Some(site.route.symbol.clone()),
                 None => None,
             };
+            // The path a client states is relative to its base, so the
+            // comparable form is the join — and the written form too, since
+            // together they are what the source says.
+            let mut stated = site.route.clone();
+            if let Some(base) = site.receiver.as_deref().and_then(base_of) {
+                stated.written = route::join(base, &stated.written);
+            }
             match handler {
-                Some(symbol) => served_refs.push(route::RouteRef {
-                    symbol,
-                    ..site.route.clone()
-                }),
+                Some(symbol) => served_refs.push(route::RouteRef { symbol, ..stated }),
                 // Nothing was handed anywhere: the call is asking.
-                None => asked_refs.push(site.route.clone()),
+                None => asked_refs.push(stated),
             }
         }
     }

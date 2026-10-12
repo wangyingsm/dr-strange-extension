@@ -1546,3 +1546,81 @@ fn a_mount_states_no_route_of_its_own() {
         "and the module that mounted it states no route either"
     );
 }
+
+// ---- a client's base path -------------------------------------------------
+
+/// A client built with a base states its paths relative to it, and the two
+/// are usually in different files — which is the whole reason this resolves
+/// at assemble rather than where the call is read.
+#[test]
+fn a_clients_base_reaches_the_paths_it_asks_for() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/client.ts",
+            "import axios from 'axios';\nexport const api = axios.create({ baseURL: '/api/v2' });",
+        ),
+        (
+            "src/orders.ts",
+            r#"
+        import { api } from './client';
+        import axios from 'axios';
+        export function load(id: number) { return api.get(`/orders/${id}`); }
+        export function loadBare() { return axios.get('/orders'); }
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/orders.load"),
+        vec!["GET /api/v2/orders/{}".to_string()],
+        "the base reaches across the import that brought the client in"
+    );
+    assert_eq!(
+        requests(&a, "web/src/orders.loadBare"),
+        vec!["GET /orders".to_string()],
+        "a client with no base states its path whole"
+    );
+}
+
+/// A base written as a name resolves to the constant behind it, in this
+/// module or the one it was imported from.
+#[test]
+fn a_base_written_as_a_name_resolves() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        ("src/config.ts", "export const API_BASE = '/api';"),
+        (
+            "src/client.ts",
+            r#"
+        import axios from 'axios';
+        import { API_BASE } from './config';
+        export const api = axios.create({ baseURL: API_BASE });
+        export function load() { return api.get('/orders'); }
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/client.load"),
+        vec!["GET /api/orders".to_string()]
+    );
+}
+
+/// A base a project's own wrapper states is read the same way: the property
+/// is the evidence, not the name of the library.
+#[test]
+fn a_projects_own_client_wrapper_states_a_base_too() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        (
+            "src/api.ts",
+            r#"
+        const client = makeClient({ baseURL: '/bridge', retries: 2 });
+        export function check(id: number) { return client.get(`/check/${id}`); }
+        "#,
+        ),
+    ]));
+    assert_eq!(
+        requests(&a, "web/src/api.check"),
+        vec!["GET /bridge/check/{}".to_string()]
+    );
+}

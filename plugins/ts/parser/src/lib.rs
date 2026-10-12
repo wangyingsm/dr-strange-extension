@@ -246,6 +246,25 @@ pub struct FileFacts {
     /// side of the convention it is on. Split in [`assemble`].
     #[serde(default)]
     pub routes: Vec<RouteSite>,
+    /// `(name, value)` for every module-level `const` bound to a plain string
+    /// — what a base URL written as a name resolves to.
+    #[serde(default)]
+    pub literals: Vec<(String, String)>,
+    /// `(name, base)` for every client this file builds with a base path:
+    /// `const api = axios.create({ baseURL: '/api' })`. Resolved in
+    /// [`assemble`], where a client imported from another module resolves too.
+    #[serde(default)]
+    pub bases: Vec<(String, Base)>,
+}
+
+/// The base path a client was built with, as the source states it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Base {
+    /// Written in place: `axios.create({ baseURL: '/api' })`.
+    Literal(String),
+    /// Named: `axios.create({ baseURL: API_BASE })`, resolved against the
+    /// string constants of whichever module declares it.
+    Named(String),
 }
 
 /// One route a call states, and what the call did with it.
@@ -259,6 +278,10 @@ pub struct RouteSite {
     /// The route as written, on the function the call sits in.
     pub route: route::RouteRef,
     pub handler: Option<Handler>,
+    /// The name the call was made on — `api` in `api.get('/orders')`. What a
+    /// base path is looked up by in [`assemble`].
+    #[serde(default)]
+    pub receiver: Option<String>,
 }
 
 /// The handler a declaration hands its path to.
@@ -1271,6 +1294,14 @@ impl Walker<'_> {
                 // As written, never evaluated — `256 * 1024` folded wrongly
                 // is worse than the expression that produced it.
                 props.insert("value".into(), Value::String(self.snippet(init.span())));
+                if let ast::Expr::Lit(ast::Lit::Str(lit)) = &**init {
+                    self.facts
+                        .literals
+                        .push((name.clone(), lit.value.to_atom_lossy().to_string()));
+                }
+                if let Some(base) = client_base(init) {
+                    self.facts.bases.push((name.clone(), base));
+                }
             }
             if exported {
                 props.insert("visibility".into(), Value::String("exported".into()));
@@ -1896,6 +1927,47 @@ impl CallCollector<'_, '_> {
     }
 }
 
+/// The base path a client is built with, when the call states one.
+///
+/// `axios.create({ baseURL: '/api' })`, `ky.create({ prefixUrl: '/api' })`,
+/// and a base written as a name rather than in place. Read from the
+/// *property* rather than from a list of known clients, the way a path is
+/// read from an argument: a project's own `makeClient({ baseURL })` wrapper
+/// states it the same way and is seen the same way.
+fn client_base(init: &ast::Expr) -> Option<Base> {
+    const BASE_KEYS: &[&str] = &["baseURL", "baseUrl", "basePath", "prefixUrl", "base"];
+    let ast::Expr::Call(call) = init else {
+        return None;
+    };
+    for arg in &call.args {
+        let ast::Expr::Object(obj) = &*arg.expr else {
+            continue;
+        };
+        for prop in &obj.props {
+            let ast::PropOrSpread::Prop(p) = prop else {
+                continue;
+            };
+            let ast::Prop::KeyValue(kv) = &**p else {
+                continue;
+            };
+            let Some(name) = prop_name(&kv.key) else {
+                continue;
+            };
+            if !BASE_KEYS.contains(&name.as_str()) {
+                continue;
+            }
+            match &*kv.value {
+                ast::Expr::Lit(ast::Lit::Str(s)) => {
+                    return Some(Base::Literal(s.value.to_atom_lossy().to_string()));
+                }
+                ast::Expr::Ident(i) => return Some(Base::Named(i.sym.to_string())),
+                _ => return None,
+            }
+        }
+    }
+    None
+}
+
 /// Every string literal an expression holds directly: the argument itself, or
 /// the elements of an array of them — `@Get(['a', 'b'])` declares two.
 fn str_args(expr: &ast::Expr) -> Vec<String> {
@@ -1976,6 +2048,7 @@ struct Stated {
     verb: Option<route::Verb>,
     written: Option<String>,
     handler: Option<Handler>,
+    receiver: Option<String>,
 }
 
 impl Walker<'_> {
@@ -2033,6 +2106,7 @@ impl Walker<'_> {
                     line,
                 },
                 handler: stated.handler,
+                receiver: stated.receiver,
             });
         }
         consumed
@@ -2051,6 +2125,7 @@ impl Walker<'_> {
                 verb: None,
                 written: None,
                 handler: None,
+                receiver: None,
             };
         };
         // `app.use('/api', router)` gives a router a prefix; it serves
@@ -2066,6 +2141,7 @@ impl Walker<'_> {
                 verb: None,
                 written: None,
                 handler: None,
+                receiver: None,
             };
         }
         // `axios.get(…)`, `app.post(…)`, `fetch(…)`: the verb is in the name
@@ -2076,6 +2152,16 @@ impl Walker<'_> {
                 .as_ident()
                 .and_then(|p| route::Verb::from_name(&p.sym)),
             ast::Expr::Ident(i) => route::Verb::from_name(&i.sym),
+            _ => None,
+        };
+        // `api.get('/orders')` states a path relative to whatever `api` was
+        // built with; the name is read here and the base looked up in
+        // `assemble`, where a client from another module resolves too.
+        let receiver = match &**callee {
+            ast::Expr::Member(m) => match &*m.obj {
+                ast::Expr::Ident(i) => Some(i.sym.to_string()),
+                _ => None,
+            },
             _ => None,
         };
         let mut written = None;
@@ -2119,6 +2205,7 @@ impl Walker<'_> {
             verb,
             written,
             handler,
+            receiver,
         }
     }
 
@@ -2200,6 +2287,10 @@ impl Walker<'_> {
                         // A decorator hands the path to the method it is
                         // written on, and that method is the handler.
                         handler: Some(Handler::InPlace),
+                        // A decorator's path is already the class's prefix
+                        // joined with the method's; nothing further carries
+                        // one.
+                        receiver: None,
                     });
                 }
             }
