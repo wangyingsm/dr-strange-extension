@@ -270,6 +270,12 @@ pub struct FileFacts {
     /// resolved in [`assemble`].
     #[serde(default)]
     pub mounts: Vec<Mounted>,
+    /// The prefixes this module confers on another's routes:
+    /// `path("api/", include("app.urls"))`,
+    /// `app.include_router(router, prefix="/api")`. Joined in [`assemble`]
+    /// with whatever those routes already state.
+    #[serde(default)]
+    pub includes: Vec<Include>,
 }
 
 /// One route a symbol states, and the name it stated it through.
@@ -292,6 +298,26 @@ pub enum Base {
     /// Named: `APIRouter(prefix=API_PREFIX)`, resolved against the string
     /// bindings of whichever module declares it.
     Named(String),
+}
+
+/// One prefix a module confers on routes declared elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Include {
+    /// The module conferring it — which may itself be included somewhere, so
+    /// a URL conf under a URL conf is under both.
+    pub under: String,
+    pub prefix: String,
+    pub target: Target,
+}
+
+/// What a mount confers its prefix on.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Target {
+    /// A module named by a string: Django's `include("app.urls")`.
+    Module(String),
+    /// A router named by a word: FastAPI's `include_router(router, …)`, and
+    /// Flask's `register_blueprint(bp, url_prefix=…)`.
+    Name(String),
 }
 
 /// One route a module-level registration states, before its handler is
@@ -692,12 +718,40 @@ impl Walker<'_> {
         }
     }
 
+    /// The prefix a mount call confers, stated in a keyword rather than
+    /// positionally: `app.include_router(router, prefix="/api")`,
+    /// `app.register_blueprint(bp, url_prefix="/api")`.
+    fn confers(&mut self, call: &ast::ExprCall) {
+        let Some(Base::Literal(prefix)) = built_with_base(&ast::Expr::Call(call.clone())) else {
+            return;
+        };
+        let Some(target) = call.arguments.args.iter().find_map(|a| match a {
+            ast::Expr::Name(n) => Some(Target::Name(n.id.to_string())),
+            ast::Expr::StringLiteral(s) => Some(Target::Module(s.value.to_str().to_string())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let under = self.module.clone();
+        self.facts.includes.push(Include {
+            under,
+            prefix,
+            target,
+        });
+    }
+
     /// One expression's registrations: a call, or a list or tuple of them.
     fn mounted(&mut self, expr: &ast::Expr) {
         match expr {
             ast::Expr::List(l) => l.elts.iter().for_each(|e| self.mounted(e)),
             ast::Expr::Tuple(t) => t.elts.iter().for_each(|e| self.mounted(e)),
             ast::Expr::Call(call) => {
+                // `app.include_router(router, prefix="/api")` confers its
+                // prefix on routes declared wherever that router was built.
+                if callee_name(&call.func).is_some_and(|n| route::mounts(&n)) {
+                    self.confers(call);
+                    return;
+                }
                 let Some(written) = call.arguments.args.iter().find_map(|a| match a {
                     ast::Expr::StringLiteral(s) => {
                         let text = s.value.to_str();
@@ -707,6 +761,17 @@ impl Walker<'_> {
                 }) else {
                     return;
                 };
+                // `path("api/", include("app.urls"))` confers its path on
+                // every route that module mounts, rather than serving one.
+                if let Some(target) = call.arguments.args.iter().find_map(included) {
+                    let under = self.module.clone();
+                    self.facts.includes.push(Include {
+                        under,
+                        prefix: written,
+                        target,
+                    });
+                    return;
+                }
                 let Some(handler) = call.arguments.args.iter().find_map(handed) else {
                     return;
                 };
@@ -1563,6 +1628,31 @@ fn built_with_base(value: &ast::Expr) -> Option<Base> {
         };
     }
     None
+}
+
+/// A callee's own name: `include_router` in `app.include_router(…)`, and
+/// `include` in `include("app.urls")`.
+fn callee_name(func: &ast::Expr) -> Option<String> {
+    match func {
+        ast::Expr::Name(n) => Some(n.id.to_string()),
+        ast::Expr::Attribute(a) => Some(a.attr.id.to_string()),
+        _ => None,
+    }
+}
+
+/// The module or router an `include`-shaped call names.
+fn included(e: &ast::Expr) -> Option<Target> {
+    let ast::Expr::Call(call) = e else {
+        return None;
+    };
+    if !callee_name(&call.func).is_some_and(|n| route::mounts(&n)) {
+        return None;
+    }
+    call.arguments.args.iter().find_map(|a| match a {
+        ast::Expr::StringLiteral(s) => Some(Target::Module(s.value.to_str().to_string())),
+        ast::Expr::Name(n) => Some(Target::Name(n.id.to_string())),
+        _ => None,
+    })
 }
 
 /// The name a call was made on — `router` in `@router.get("/orders")`, which

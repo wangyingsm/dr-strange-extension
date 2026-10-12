@@ -1379,3 +1379,74 @@ fn a_name_with_no_prefix_leaves_the_path_whole() {
     )]));
     assert_eq!(serves(&a, "api.health"), vec!["GET /health".to_string()]);
 }
+
+/// A Django project confers its path on an included URL conf, and an
+/// included conf on one it includes — two files, or three.
+#[test]
+fn an_included_url_conf_is_under_the_path_that_included_it() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/views.py",
+            "def one(request, order_id):\n\
+             \x20   return order_id\n",
+        ),
+        (
+            "app/urls.py",
+            "from django.urls import include, path\n\
+             \n\
+             from . import views\n\
+             \n\
+             urlpatterns = [\n\
+             \x20   path(\"orders/<int:order_id>\", views.one),\n\
+             ]\n",
+        ),
+        ("project/__init__.py", ""),
+        (
+            "project/urls.py",
+            "from django.urls import include, path\n\
+             \n\
+             urlpatterns = [\n\
+             \x20   path(\"api/\", include(\"app.urls\")),\n\
+             ]\n",
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "app.views.one"),
+        vec!["* /api/orders/{}".to_string()],
+        "the project's path reached the view through the conf that declared it"
+    );
+}
+
+/// FastAPI states a prefix twice over: the router's own, and the one the app
+/// gave it when including it. Both apply, outermost first.
+#[test]
+fn an_included_router_is_under_both_prefixes() {
+    let a = run(&tree(vec![
+        ("app/__init__.py", ""),
+        (
+            "app/orders.py",
+            "from fastapi import APIRouter\n\
+             \n\
+             router = APIRouter(prefix=\"/orders\")\n\
+             \n\
+             @router.get(\"/{order_id}\")\n\
+             def one(order_id: int):\n\
+             \x20   return order_id\n",
+        ),
+        (
+            "app/main.py",
+            "from fastapi import FastAPI\n\
+             \n\
+             from .orders import router\n\
+             \n\
+             app = FastAPI()\n\
+             app.include_router(router, prefix=\"/api/v2\")\n",
+        ),
+    ]));
+    assert_eq!(
+        serves(&a, "app.orders.one"),
+        vec!["GET /api/v2/orders/{}".to_string()],
+        "the included prefix wraps the router's own"
+    );
+}

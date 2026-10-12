@@ -3,7 +3,7 @@
 //! every chunk's facts together, in chunk order. The result must not depend
 //! on where the chunk boundaries fell.
 
-use crate::{Base, CallKind, Edge, FileFacts, Node, Props, Shape, edge_at};
+use crate::{Base, CallKind, Edge, FileFacts, Node, Props, Shape, Target, edge_at};
 use dr_strange_ext::route;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -356,26 +356,75 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // A prefix one module confers on another's routes: Django's
+    // `include("app.urls")` names the module, FastAPI's
+    // `include_router(router, prefix=…)` names the router. Both end as a
+    // dotted string this map is keyed by — a module id or a symbol key.
+    //
+    // Iterated because a URL conf included by an included URL conf is under
+    // both, and bounded rather than recursive: deeper than any real tree, and
+    // a cycle must not hang a parse.
+    let mut pairs: Vec<(String, &str, &str)> = Vec::new();
+    for f in &all {
+        let bindings = file_bindings(f);
+        for inc in &f.includes {
+            let key = match &inc.target {
+                Target::Module(module) => module.clone(),
+                Target::Name(name) => match decl_of(f, &bindings, name) {
+                    Some(key) => key,
+                    None => continue,
+                },
+            };
+            pairs.push((key, inc.prefix.as_str(), inc.under.as_str()));
+        }
+    }
+    let mut conferred: BTreeMap<String, String> = BTreeMap::new();
+    for (key, prefix, _) in &pairs {
+        conferred.insert(key.clone(), (*prefix).to_string());
+    }
+    for _ in 0..4 {
+        let mut grew = false;
+        for (key, prefix, under) in &pairs {
+            let Some(outer) = conferred.get(*under).cloned() else {
+                continue;
+            };
+            let joined = route::join(&outer, prefix);
+            if conferred.get(key) != Some(&joined) {
+                conferred.insert(key.clone(), joined);
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     let mut asked_refs: Vec<route::RouteRef> = Vec::new();
     let mut served_refs: Vec<route::RouteRef> = Vec::new();
     for f in &all {
         let bindings = file_bindings(f);
-        // The path a receiver carries: built in this module, or imported from
-        // the one that built it.
-        let base_of = |name: &str| -> Option<&str> {
-            if let Some(found) = bases
+        // The path a receiver carries: built where it was, and under whatever
+        // prefix another module conferred on it. A FastAPI router has both —
+        // its own `prefix=` inside the one its `include_router` was given.
+        let base_of = |name: &str| -> Option<String> {
+            let own = bases
                 .get(f.module_id.as_str())
                 .and_then(|m| m.get(name).copied())
-            {
-                return Some(found);
+                .or_else(|| {
+                    let (target, member) = bindings.get(name)?;
+                    bases.get(target.as_str())?.get(member.as_str()).copied()
+                });
+            let outer = decl_of(f, &bindings, name).and_then(|key| conferred.get(&key).cloned());
+            match (outer, own) {
+                (Some(outer), Some(own)) => Some(route::join(&outer, own)),
+                (Some(outer), None) => Some(outer),
+                (None, Some(own)) => Some(own.to_string()),
+                (None, None) => None,
             }
-            let (target, member) = bindings.get(name)?;
-            bases.get(target.as_str())?.get(member.as_str()).copied()
         };
         let joined = |stated: &crate::Stated| -> route::RouteRef {
             let mut out = stated.route.clone();
             if let Some(base) = stated.receiver.as_deref().and_then(base_of) {
-                out.written = route::join(base, &out.written);
+                out.written = route::join(&base, &out.written);
             }
             out
         };
@@ -383,10 +432,16 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
         asked_refs.extend(f.requests.iter().map(&joined));
         for m in &f.mounts {
             let symbol = decl_of(f, &bindings, &m.handler).unwrap_or_else(|| m.module.clone());
+            // A URL conf included elsewhere states its paths under the path
+            // the including module gave it.
+            let written = match conferred.get(&m.module) {
+                Some(prefix) => route::join(prefix, &m.written),
+                None => m.written.clone(),
+            };
             served_refs.push(route::RouteRef {
                 symbol,
                 verb: None,
-                written: m.written.clone(),
+                written,
                 line: m.line,
             });
         }

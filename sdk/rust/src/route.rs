@@ -97,6 +97,7 @@ impl Verb {
 pub fn mounts(name: &str) -> bool {
     const MOUNT_WORDS: &[&str] = &[
         "group",
+        "include",
         "include_router",
         "merge",
         "mount",

@@ -180,7 +180,7 @@ func TestTheDeclarationSideWritesServes(t *testing.T) {
 func TestAMountIsNotARoute(t *testing.T) {
 	for _, name := range []string{
 		"use", "nest", "nest_service", "merge", "scope", "mount", "Group", "group",
-		"include_router", "register_blueprint",
+		"include", "include_router", "register_blueprint",
 	} {
 		if !Mounts(name) {
 			t.Errorf("Mounts(%q) = false", name)

@@ -186,7 +186,7 @@ func Route(verb Verb, p string) string {
 // mountWords are the calls that give a router a prefix rather than serving a
 // path. Nine words rather than a framework table.
 var mountWords = map[string]bool{
-	"group": true, "include_router": true, "merge": true, "mount": true,
+	"group": true, "include": true, "include_router": true, "merge": true, "mount": true,
 	"nest": true, "nest_service": true, "register_blueprint": true,
 	"scope": true, "use": true,
 }
