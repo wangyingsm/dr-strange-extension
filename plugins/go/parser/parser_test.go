@@ -1457,3 +1457,29 @@ func TestTheDeclarationsAreCountedInTheReport(t *testing.T) {
 	}
 	t.Errorf("no account of the routes declared in %v", a.Notes)
 }
+
+// A mount gives a router a prefix, and the function doing it serves nothing
+// and asks for nothing — gin's and echo's `Group` alike.
+func TestAMountStatesNoRouteOfItsOwn(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"main.go": `package m
+
+func List(w, r any) {}
+
+func routes(r any) {
+	g := r.Group("/api")
+	g.GET("/orders", List)
+}
+`,
+	}})
+	if got := serves(t, a, "m.List"); !reflect.DeepEqual(got, []string{"GET /orders"}) {
+		t.Errorf("List serves %v, want the route without the prefix it is given later", got)
+	}
+	if got := requests(t, a, "m.routes"); got != nil {
+		t.Errorf("routes asks for %v", got)
+	}
+	if got := serves(t, a, "m.routes"); got != nil {
+		t.Errorf("routes serves %v", got)
+	}
+}

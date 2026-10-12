@@ -211,3 +211,67 @@ fn the_declaration_side_writes_serves() {
     );
     assert!(served.note(1).unwrap().contains("declared by a handler"));
 }
+
+/// A mount gives a router a prefix; it serves nothing and asks for nothing,
+/// and recording its path as a route is wrong in both directions.
+#[test]
+fn a_mount_is_not_a_route() {
+    for name in [
+        "use",
+        "nest",
+        "nest_service",
+        "merge",
+        "scope",
+        "mount",
+        "Group",
+        "group",
+        "include_router",
+        "register_blueprint",
+    ] {
+        assert!(mounts(name), "{name}");
+    }
+    // `route` says nothing on its own: axum's is a route, chi's is a mount.
+    for name in ["route", "Route", "get", "handle", "HandleFunc", "service"] {
+        assert!(!mounts(name), "{name}");
+    }
+}
+
+/// A wildcard path is a pattern a framework guards with, not one a client
+/// asks for — and left in, it would match the very handler it guards.
+#[test]
+fn a_pattern_is_not_a_request() {
+    let refs = vec![
+        RouteRef {
+            symbol: "cfg.addCors".into(),
+            verb: None,
+            written: "/api/**".into(),
+            line: 3,
+        },
+        RouteRef {
+            symbol: "web.load".into(),
+            verb: Some(Verb::Get),
+            written: "/api/orders".into(),
+            line: 9,
+        },
+    ];
+    let asked = Routes::of(Side::Requests, &refs);
+    let mut props = Map::new();
+    assert_eq!(asked.write("cfg.addCors", &mut props), 0);
+    assert!(props.is_empty(), "a pattern writes no request");
+    assert_eq!(asked.write("web.load", &mut props), 1);
+    let note = asked.note(1).unwrap();
+    assert!(
+        note.contains("1 wildcard pattern(s) left out"),
+        "the account says what it dropped: {note}"
+    );
+
+    // A declaration may legitimately be written that way, and is kept.
+    let served = Routes::of(Side::Serves, &refs);
+    let mut props = Map::new();
+    assert_eq!(served.write("cfg.addCors", &mut props), 1);
+    assert_eq!(
+        props["serves"]["$value"],
+        serde_json::json!(["* /api/{}"]),
+        "an Ant-style declaration reduces its wildcard like any variable"
+    );
+}

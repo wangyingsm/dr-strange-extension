@@ -175,3 +175,48 @@ func TestTheDeclarationSideWritesServes(t *testing.T) {
 		t.Errorf("Note = %q", served.Note(1))
 	}
 }
+
+// A mount gives a router a prefix; it serves nothing and asks for nothing.
+func TestAMountIsNotARoute(t *testing.T) {
+	for _, name := range []string{
+		"use", "nest", "nest_service", "merge", "scope", "mount", "Group", "group",
+		"include_router", "register_blueprint",
+	} {
+		if !Mounts(name) {
+			t.Errorf("Mounts(%q) = false", name)
+		}
+	}
+	// `Route` says nothing on its own: axum's is a route, chi's is a mount.
+	for _, name := range []string{"route", "Route", "get", "HandleFunc", "service"} {
+		if Mounts(name) {
+			t.Errorf("Mounts(%q) = true", name)
+		}
+	}
+}
+
+// A wildcard path is a pattern a framework guards with, not one a client asks
+// for — and left in, it would match the very handler it guards.
+func TestAPatternIsNotARequest(t *testing.T) {
+	refs := []Ref{
+		{Symbol: "cfg.addCors", Written: "/api/**", Line: 3},
+		{Symbol: "web.load", Verb: Get, Written: "/api/orders", Line: 9},
+	}
+	asked := Of(Requests, refs)
+	props := map[string]any{}
+	if n := asked.Write("cfg.addCors", props); n != 0 || len(props) != 0 {
+		t.Errorf("a pattern wrote %d request(s) and %d prop(s)", n, len(props))
+	}
+	if n := asked.Write("web.load", props); n != 1 {
+		t.Errorf("the concrete path wrote %d", n)
+	}
+	if note := asked.Note(1); !strings.Contains(note, "1 wildcard pattern(s) left out") {
+		t.Errorf("the account says what it dropped: %q", note)
+	}
+
+	// A declaration may legitimately be written that way, and is kept.
+	served := Of(Serves, refs)
+	props = map[string]any{}
+	if n := served.Write("cfg.addCors", props); n != 1 {
+		t.Errorf("an Ant-style declaration wrote %d", n)
+	}
+}

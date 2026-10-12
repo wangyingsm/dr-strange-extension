@@ -3544,3 +3544,34 @@ fn the_declarations_are_counted_in_the_report() {
         a.notes
     );
 }
+
+/// A mount gives a router a prefix, and the function doing it serves nothing
+/// and asks for nothing — axum's `nest` and actix's `scope` alike.
+#[test]
+fn a_mount_states_no_route_of_its_own() {
+    let t = Tree::new("routesmount");
+    t.write(
+        "src/lib.rs",
+        r#"
+pub async fn list() -> String { String::new() }
+
+pub fn api() -> Router { Router::new().route("/orders", get(list)) }
+
+pub fn app() -> Router { Router::new().nest("/api", api()) }
+
+pub fn scoped() -> Scope { web::scope("/api").service(list) }
+"#,
+    );
+    let a = run(&t);
+    assert_eq!(
+        serves(&a, "crate::list"),
+        vec!["GET /orders".to_string()],
+        "the nested route is still read, without the prefix it is given later"
+    );
+    for key in ["crate::app", "crate::scoped"] {
+        assert!(
+            requests(&a, key).is_empty() && serves(&a, key).is_empty(),
+            "{key} states no route of its own"
+        );
+    }
+}

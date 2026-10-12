@@ -183,6 +183,45 @@ func Route(verb Verb, p string) string {
 	return string(verb) + " " + Normalize(p)
 }
 
+// mountWords are the calls that give a router a prefix rather than serving a
+// path. Nine words rather than a framework table.
+var mountWords = map[string]bool{
+	"group": true, "include_router": true, "merge": true, "mount": true,
+	"nest": true, "nest_service": true, "register_blueprint": true,
+	"scope": true, "use": true,
+}
+
+// Mounts reports whether this callee names a mount — a call that gives a
+// router a prefix rather than serving a path.
+//
+// `app.use("/api", router)`, `r.Group("/api")`, `.nest("/api", api())`: the
+// path belongs to every route hung on that router, and to none of them yet.
+// Recording it as a route of its own is a wrong fact in both directions — the
+// function doing the mounting serves nothing and asks for nothing.
+//
+// `Route` is deliberately not one of them: axum's `.route(path, get(h))` is a
+// route and chi's `Route(path, fn)` is a mount, so the word says nothing on
+// its own and chi's prefix stays a known miss.
+func Mounts(name string) bool {
+	return mountWords[strings.ToLower(name)]
+}
+
+// wildcarded reports whether a path is a pattern rather than one a client
+// could ask for.
+//
+// A wildcard segment is how a framework spells "and everything under it": a
+// CORS mapping, a static-resource handler, a security matcher. A declaration
+// may legitimately be written that way, which is why [Normalize] reduces `*`
+// to `{}`; a request never is, because a client asks for a concrete path.
+func wildcarded(p string) bool {
+	for _, segment := range strings.Split(p, "/") {
+		if segment == "*" || segment == "**" {
+			return true
+		}
+	}
+	return false
+}
+
 // Ref is one route a symbol states, as the source wrote it.
 //
 // The same record serves both sides, because a parser reads both the same
@@ -259,12 +298,20 @@ type stated struct {
 type Routes struct {
 	side     Side
 	bySymbol map[string]*stated
+	// patterns counts what was left out of the request side, so the account
+	// can say so rather than drop them in silence.
+	patterns int
 }
 
 // Of folds a parse's records, one side of the convention.
 func Of(side Side, refs []Ref) Routes {
 	by := map[string]*stated{}
+	patterns := 0
 	for _, r := range refs {
+		if side == Requests && wildcarded(r.Written) {
+			patterns++
+			continue
+		}
 		s := by[r.Symbol]
 		if s == nil {
 			s = &stated{comparable: map[string]bool{}, written: map[string]bool{}}
@@ -273,7 +320,7 @@ func Of(side Side, refs []Ref) Routes {
 		s.comparable[r.Route()] = true
 		s.written[r.Written] = true
 	}
-	return Routes{side: side, bySymbol: by}
+	return Routes{side: side, bySymbol: by, patterns: patterns}
 }
 
 // Write writes this symbol's two properties into props, and returns how many
@@ -299,16 +346,21 @@ func (rs Routes) Write(symbol string, props map[string]any) int {
 // folded, so a record naming a symbol no node holds is not claimed as
 // recorded.
 func (rs Routes) Note(recorded int) string {
-	if recorded == 0 {
+	if recorded == 0 && rs.patterns == 0 {
 		return ""
 	}
 	property, what := "requests", "asked for by a call whose argument is a path"
 	if rs.side == Serves {
 		property, what = "serves", "declared by a handler"
 	}
-	return fmt.Sprintf(
+	note := fmt.Sprintf(
 		"%d route(s) %s — recorded as `%s`; the other half is matched on demand, never stored",
 		recorded, what, property)
+	if rs.patterns > 0 {
+		note += fmt.Sprintf(
+			"; %d wildcard pattern(s) left out, which a client cannot ask for", rs.patterns)
+	}
+	return note
 }
 
 // sorted is a set as the sorted list a property carries: the same order the

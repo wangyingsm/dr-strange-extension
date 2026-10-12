@@ -854,6 +854,18 @@ func (w *walker) routeRef(caller string, call *ast.CallExpr) {
 	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Sprintf" {
 		return
 	}
+	// `r.Group("/api")` gives a router a prefix; the path belongs to the
+	// routes hung on that router, not to this call.
+	switch fn := call.Fun.(type) {
+	case *ast.Ident:
+		if route.Mounts(fn.Name) {
+			return
+		}
+	case *ast.SelectorExpr:
+		if route.Mounts(fn.Sel.Name) {
+			return
+		}
+	}
 	// `http.Get(url)`, `r.GET("/x", h)`, `client.Post(…)`: the verb is in the
 	// name when the framework puts it there. `HandleFunc` and `Do` put it
 	// nowhere, and `*` is what that means.

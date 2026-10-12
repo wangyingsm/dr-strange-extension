@@ -81,6 +81,51 @@ impl Verb {
     }
 }
 
+/// Does this callee name a **mount** — a call that gives a router a prefix
+/// rather than serving a path?
+///
+/// `app.use('/api', router)`, `.nest("/api", api())`, `web::scope("/api")`,
+/// `r.Group("/api")`, `.mount("/api", routes![…])`: the path belongs to every
+/// route hung on that router, and to none of them yet. Recording it as a
+/// route of its own is a wrong fact in both directions — the function doing
+/// the mounting serves nothing and asks for nothing.
+///
+/// Nine words rather than a framework table, and `route` is deliberately not
+/// one of them: axum's `.route(path, get(h))` *is* a route and chi's
+/// `Route(path, fn)` is a mount, so the word says nothing on its own and
+/// chi's prefix stays a known miss.
+pub fn mounts(name: &str) -> bool {
+    const MOUNT_WORDS: &[&str] = &[
+        "group",
+        "include_router",
+        "merge",
+        "mount",
+        "nest",
+        "nest_service",
+        "register_blueprint",
+        "scope",
+        "use",
+    ];
+    let lower = name.to_ascii_lowercase();
+    MOUNT_WORDS.contains(&lower.as_str())
+}
+
+/// Is this path a **pattern** rather than one a client could ask for?
+///
+/// A wildcard segment — `/**`, `/static/*` — is how a framework spells "and
+/// everything under it": Spring's `antMatchers("/api/**")`, a CORS
+/// `addMapping`, a static-resource handler. A declaration may legitimately
+/// be written that way, which is why [`normalize`] reduces `*` to `{}`; a
+/// *request* never is, because a client asks for a concrete path.
+///
+/// Without this, a security config's `/api/**` normalises to `/api/{}` and
+/// matches the handler it was written to guard — a wrong answer rather than
+/// a missing one.
+fn wildcarded(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| segment == "*" || segment == "**")
+}
+
 /// One route a symbol states, as the source wrote it.
 ///
 /// The same record serves both sides, because a parser reads both the same
@@ -170,18 +215,30 @@ struct Stated<'a> {
 pub struct Routes<'a> {
     side: Side,
     by_symbol: BTreeMap<&'a str, Stated<'a>>,
+    /// Patterns left out of the request side, counted so the account can say
+    /// so rather than drop them in silence.
+    patterns: usize,
 }
 
 impl<'a> Routes<'a> {
     /// Fold a parse's records, one side of the convention.
     pub fn of(side: Side, refs: impl IntoIterator<Item = &'a RouteRef>) -> Self {
         let mut by_symbol: BTreeMap<&str, Stated> = BTreeMap::new();
+        let mut patterns = 0usize;
         for r in refs {
+            if side == Side::Requests && wildcarded(&r.written) {
+                patterns += 1;
+                continue;
+            }
             let stated = by_symbol.entry(r.symbol.as_str()).or_default();
             stated.comparable.insert(r.route());
             stated.written.insert(r.written.as_str());
         }
-        Self { side, by_symbol }
+        Self {
+            side,
+            by_symbol,
+            patterns,
+        }
     }
 
     /// Write this symbol's two properties, and say how many routes that was.
@@ -211,17 +268,24 @@ impl<'a> Routes<'a> {
     /// what was folded, so a record naming a symbol no node holds is not
     /// claimed as recorded.
     pub fn note(&self, recorded: usize) -> Option<String> {
-        if recorded == 0 {
+        if recorded == 0 && self.patterns == 0 {
             return None;
         }
         let (property, what) = match self.side {
             Side::Serves => ("serves", "declared by a handler"),
             Side::Requests => ("requests", "asked for by a call whose argument is a path"),
         };
-        Some(format!(
+        let mut note = format!(
             "{recorded} route(s) {what} — recorded as `{property}`; the other half is \
              matched on demand, never stored"
-        ))
+        );
+        if self.patterns > 0 {
+            note.push_str(&format!(
+                "; {} wildcard pattern(s) left out, which a client cannot ask for",
+                self.patterns
+            ));
+        }
+        Some(note)
     }
 }
 

@@ -1500,6 +1500,11 @@ fn call_names(block: &syn::Block) -> BodyFacts {
         /// resolved name tells a handler from a value the call happens to
         /// take.
         fn route_ref(&mut self, verb: Option<&syn::Ident>, args: &Args, line: u64) {
+            // `.nest("/api", api())`, `web::scope("/api")`: the path belongs
+            // to the routes hung on that router, not to this call.
+            if verb.is_some_and(|v| route::mounts(&v.to_string())) {
+                return;
+            }
             let verb = verb.and_then(|v| route::Verb::from_name(&v.to_string()));
             let Some(written) = args.iter().find_map(path_text) else {
                 return;

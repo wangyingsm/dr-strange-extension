@@ -1519,3 +1519,30 @@ fn a_decorator_that_is_not_a_routes_declares_nothing() {
         "no verb and no path-shaped literal anywhere"
     );
 }
+
+/// A mount gives a router a prefix: `app.use('/api', router)` serves nothing
+/// and asks for nothing, and the path belongs to the routes hung on that
+/// router rather than to this call.
+#[test]
+fn a_mount_states_no_route_of_its_own() {
+    let a = run(&tree(vec![
+        ("package.json", r#"{ "name": "web" }"#),
+        ("src/router.ts", "export function router() {}"),
+        (
+            "src/app.ts",
+            r#"
+        import { router } from './router';
+        const app = express();
+        app.use('/api', router);
+        "#,
+        ),
+    ]));
+    assert!(
+        serves(&a, "web/src/router.router").is_empty(),
+        "a mounted router is nobody's handler"
+    );
+    assert!(
+        requests(&a, "web/src/app").is_empty() && serves(&a, "web/src/app").is_empty(),
+        "and the module that mounted it states no route either"
+    );
+}

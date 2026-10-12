@@ -2053,6 +2053,21 @@ impl Walker<'_> {
                 handler: None,
             };
         };
+        // `app.use('/api', router)` gives a router a prefix; it serves
+        // nothing and asks for nothing, and the path belongs to the routes
+        // hung on that router rather than to this call.
+        let named = match &**callee {
+            ast::Expr::Member(m) => m.prop.as_ident().map(|p| p.sym.to_string()),
+            ast::Expr::Ident(i) => Some(i.sym.to_string()),
+            _ => None,
+        };
+        if named.as_deref().is_some_and(route::mounts) {
+            return Stated {
+                verb: None,
+                written: None,
+                handler: None,
+            };
+        }
         // `axios.get(…)`, `app.post(…)`, `fetch(…)`: the verb is in the name
         // when the framework puts it there.
         let mut verb = match &**callee {
