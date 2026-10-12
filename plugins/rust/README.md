@@ -74,6 +74,44 @@ cannot move where the graph says it starts.
 | `ANNOTATED_BY` | item → an attribute on it — `#[tokio::main]`, `#[get("/health")]`, `#[serde(...)]`. The *path* is the node and the whole attribute rides on the edge as `arguments`, so `get` stays one node with a route per edge instead of a node per route. `derive` leaves by the other door; `doc`, `non_exhaustive`, the `#[test]` family, lint and codegen attributes and `cfg` stay out | the attribute |
 | `USES_TYPE` | declaration → a type it is **typed by**, `role` on the edge saying which position (`field`, `param`, `return`, `variant`, `alias`) and the union of them when one pair is written twice. Generic arguments are walked — `mpsc::Sender<Job>` is a dependency on `Job` — and only types this tree declares get an edge; a foreign one stays text in `signature`/`fields`. Never a self-loop | — |
 
+## Routes
+
+An HTTP route is the one reference this plugin cannot turn into an edge: the
+handler or the caller is in another language, often another repository, and
+between the two sides there is only a string. So the plugin records what the
+source *states* and leaves the match to drsg's `wire`, which computes it per
+call and never stores it.
+
+On the symbol that already exists:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the handler an attribute marks, or that a router's `.route` names | `GET /api/orders/{}` — the verb, and the path with every variable segment reduced to `{}` |
+| `requests` | the function making the call | the same shape; `*` where the source states no verb |
+| `serves_as_written` / `requests_as_written` | both | the path exactly as the source wrote it, before normalising |
+
+**Declarations** come in both of Rust's idioms. An attribute carrying a path
+records on the function below it — `#[get("/x")]` (actix, rocket), with the
+verb read from the attribute's own name. And axum's builder records on the
+**handler it names**: `.route("/orders/{id}", get(list).post(create))` puts the
+route on `list` and on `create`, with one verb each, which is how axum says it
+and needs no attribute at all.
+
+**A nested router's prefix reaches its routes.** `.nest("/api", api())` gives a
+router a prefix that belongs to every route hung on it and to none of them yet,
+so the nesting function serves nothing — the prefix reaches the handlers
+instead.
+
+**Requests** are any call with a path-shaped string argument, whatever the
+callee is called — `reqwest` and a project-local wrapper alike. An absolute URL
+or a query string reduces to the path.
+
+**A path-shaped literal that is not a route is recorded anyway.**
+`std::fs::read_to_string("/etc/app/config.toml")` looks exactly like a request
+and the parser cannot tell the difference. It is recorded, matches no
+declaration, and is counted as a request that reached none — a named miss
+rather than a wrong edge, which is the trade this whole shape takes.
+
 ## Resolution — the certainty line
 
 - A call written as a **path** (`fs::read(…)`, `Vec::new()`) is expanded
