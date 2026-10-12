@@ -15,13 +15,17 @@
 //! declaration is a question asked of the graph, not an edge drawn into it, so
 //! this module normalises and never resolves.
 
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::collections::{BTreeMap, BTreeSet};
+
 /// An HTTP verb, as the frameworks spell it.
 ///
 /// `Any` is not a verb a client sends: it is what a declaration means when it
 /// names no verb (Spring's bare `@RequestMapping`, `http.HandleFunc`,
 /// Django's `path()`), and what a request means when a project-local wrapper
 /// hides it. It matches every verb, and a reader is told that it did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verb {
     Get,
     Post,
@@ -74,6 +78,150 @@ impl Verb {
             Verb::Options => "OPTIONS",
             Verb::Any => "*",
         }
+    }
+}
+
+/// One route a symbol states, as the source wrote it.
+///
+/// The same record serves both sides, because a parser reads both the same
+/// way: a handler that *serves* a path, and a function whose call *asks for*
+/// one. What differs is the property it is written to, not what was read —
+/// so every Rust-written plugin carries this one between its two phases
+/// instead of declaring its own.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteRef {
+    /// The symbol the route belongs to: the declaring handler, or the
+    /// function making the call.
+    pub symbol: String,
+    /// The verb the source states — in the callee's name, an annotation, or
+    /// a `method` argument. `None` when it states none, which a
+    /// project-local `request()` wrapper never does.
+    pub verb: Option<Verb>,
+    /// The path exactly as the source writes it, before normalising.
+    pub written: String,
+    /// Where it is written, 1-based.
+    pub line: u64,
+}
+
+impl RouteRef {
+    /// The comparable form — [`route`] over this record's own two halves.
+    pub fn route(&self) -> String {
+        route(self.verb, &self.written)
+    }
+}
+
+/// Which half of a route a set of records states.
+///
+/// A handler *serves* a path and a call *asks for* one. The records are read
+/// the same way and differ only in which pair of properties they are written
+/// to, which is all this names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// A declaration, written on the handler.
+    Serves,
+    /// A request, written on the function making the call.
+    Requests,
+}
+
+impl Side {
+    /// The property holding the comparable form, and what it says.
+    fn comparable(self) -> (&'static str, &'static str) {
+        match self {
+            Side::Serves => (
+                "serves",
+                "the routes this handler serves, as `VERB path` with every variable \
+                 segment reduced to `{}` — `*` where the declaration names no verb. \
+                 `wire` matches these against what asks for them",
+            ),
+            Side::Requests => (
+                "requests",
+                "the routes this function asks for, as `VERB path` with every variable \
+                 segment reduced to `{}` — `*` where the call names no verb. `wire` \
+                 matches these against what serves them",
+            ),
+        }
+    }
+
+    /// The property holding the source's own spelling, and what it says.
+    fn as_written(self) -> (&'static str, &'static str) {
+        let name = match self {
+            Side::Serves => "serves_as_written",
+            Side::Requests => "requests_as_written",
+        };
+        (name, "the same paths exactly as the source writes them")
+    }
+}
+
+/// One symbol's routes: the comparable forms, and the spellings they came
+/// from. Sets, because one function may ask for the same path twice.
+#[derive(Debug, Default)]
+struct Stated<'a> {
+    comparable: BTreeSet<String>,
+    written: BTreeSet<&'a str>,
+}
+
+/// The routes each symbol states, folded ready to write.
+///
+/// Every plugin's assemble phase does the same two things with the records
+/// its parse produced — fold them by symbol, then write two properties on
+/// that symbol's node — so it is done here once, against the one `Props`
+/// shape every plugin uses.
+#[derive(Debug)]
+pub struct Routes<'a> {
+    side: Side,
+    by_symbol: BTreeMap<&'a str, Stated<'a>>,
+}
+
+impl<'a> Routes<'a> {
+    /// Fold a parse's records, one side of the convention.
+    pub fn of(side: Side, refs: impl IntoIterator<Item = &'a RouteRef>) -> Self {
+        let mut by_symbol: BTreeMap<&str, Stated> = BTreeMap::new();
+        for r in refs {
+            let stated = by_symbol.entry(r.symbol.as_str()).or_default();
+            stated.comparable.insert(r.route());
+            stated.written.insert(r.written.as_str());
+        }
+        Self { side, by_symbol }
+    }
+
+    /// Write this symbol's two properties, and say how many routes that was.
+    ///
+    /// Zero, and nothing written, when the symbol states none: a function
+    /// that asks for nothing carries no property rather than an empty one.
+    pub fn write(&self, symbol: &str, props: &mut Map<String, Value>) -> usize {
+        let Some(stated) = self.by_symbol.get(symbol) else {
+            return 0;
+        };
+        let (name, desc) = self.side.comparable();
+        props.insert(
+            name.into(),
+            json!({ "$desc": desc, "$value": stated.comparable.iter().collect::<Vec<_>>() }),
+        );
+        let (name, desc) = self.side.as_written();
+        props.insert(
+            name.into(),
+            json!({ "$desc": desc, "$value": stated.written.iter().collect::<Vec<_>>() }),
+        );
+        stated.comparable.len()
+    }
+
+    /// The account of what was written, when there is one to give.
+    ///
+    /// Counted from what [`Routes::write`] actually attached rather than from
+    /// what was folded, so a record naming a symbol no node holds is not
+    /// claimed as recorded.
+    pub fn note(&self, recorded: usize) -> Option<String> {
+        if recorded == 0 {
+            return None;
+        }
+        let (property, what) = match self.side {
+            Side::Serves => ("serves", "declared by a handler"),
+            Side::Requests => ("requests", "asked for by a call whose argument is a path"),
+        };
+        Some(format!(
+            "{recorded} route(s) {what} — recorded as `{property}`; the other half is \
+             matched on demand, never stored"
+        ))
     }
 }
 

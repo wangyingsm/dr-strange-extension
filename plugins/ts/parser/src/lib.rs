@@ -245,21 +245,7 @@ pub struct FileFacts {
     /// The routes this file's functions ask for — a call argument shaped like
     /// a path. Attached to the calling function in [`assemble`].
     #[serde(default)]
-    pub requests: Vec<RouteRef>,
-}
-
-/// One route a call asks for, as the source wrote it.
-///
-/// The path is kept unnormalised here: a reader wants the text that is in the
-/// file, and the comparable form is derived from it at assemble.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouteRef {
-    pub caller: String,
-    /// The verb the callee's own name carries — `None` when it carries none,
-    /// which a project-local `request()` wrapper never does.
-    pub verb: Option<String>,
-    pub written: String,
-    pub line: u64,
+    pub requests: Vec<route::RouteRef>,
 }
 
 /// Parse one chunk of paths into per-file facts.
@@ -1902,9 +1888,9 @@ impl CallCollector<'_, '_> {
         }
         if let Some(written) = written {
             let line = self.walker.line(node.span);
-            self.walker.facts.requests.push(RouteRef {
-                caller: self.caller.clone(),
-                verb: verb.map(|v| v.as_str().to_string()),
+            self.walker.facts.requests.push(route::RouteRef {
+                symbol: self.caller.clone(),
+                verb,
                 written,
                 line,
             });

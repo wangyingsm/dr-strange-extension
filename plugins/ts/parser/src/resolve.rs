@@ -212,46 +212,12 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
     // On the function that makes the call, not a node of their own: a request
     // and the declaration that serves it are matched when someone asks, and
     // an edge drawn here would freeze a guess about which handler that is.
-    let mut asked: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
-    for f in &all {
-        for r in &f.requests {
-            let verb = r.verb.as_deref().and_then(route::Verb::from_name);
-            let slot = asked.entry(r.caller.clone()).or_default();
-            slot.0.insert(route::route(verb, &r.written));
-            slot.1.insert(r.written.clone());
-        }
+    let asked = route::Routes::of(route::Side::Requests, all.iter().flat_map(|f| &f.requests));
+    let mut recorded = 0usize;
+    for node in &mut out.nodes {
+        recorded += asked.write(&node.key, &mut node.props);
     }
-    let mut requests_recorded = 0usize;
-    for (caller, (routes, written)) in asked {
-        let Some(&i) = seen.get(&caller) else {
-            continue;
-        };
-        requests_recorded += routes.len();
-        let node = &mut out.nodes[i];
-        node.props.insert(
-            "requests".into(),
-            serde_json::json!({
-                "$desc": "the routes this function asks for, as `VERB path` with every \
-                          variable segment reduced to `{}` — `*` where the call names no \
-                          verb. `wire` matches these against what serves them",
-                "$value": routes.iter().cloned().collect::<Vec<_>>(),
-            }),
-        );
-        node.props.insert(
-            "requests_as_written".into(),
-            serde_json::json!({
-                "$desc": "the same paths exactly as the source writes them",
-                "$value": written.iter().cloned().collect::<Vec<_>>(),
-            }),
-        );
-    }
-    if requests_recorded > 0 {
-        out.notes.push(format!(
-            "{requests_recorded} route(s) asked for by a call whose argument is a path — \
-             recorded on the calling function as `requests`; what serves each is matched \
-             on demand, never stored"
-        ));
-    }
+    out.notes.extend(asked.note(recorded));
 
     let mut pending_edges: Vec<Edge> = Vec::new();
     // One caller may reach one callee several ways — `await f()` on one line

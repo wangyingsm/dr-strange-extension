@@ -114,3 +114,100 @@ fn the_property_is_a_verb_a_space_and_a_path() {
     assert_eq!(verb, "POST");
     assert_eq!(path, "/api/orders");
 }
+
+/// One record, both halves, and the comparable form derived from it — the
+/// type every Rust-written plugin passes between its two phases.
+#[test]
+fn a_route_ref_states_a_symbol_and_what_it_wrote() {
+    let r = RouteRef {
+        symbol: "web/src/api.one".into(),
+        verb: Some(Verb::Get),
+        written: "/api/orders/${}/items".into(),
+        line: 12,
+    };
+    assert_eq!(r.route(), "GET /api/orders/{}/items");
+    let round: RouteRef = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+    assert_eq!(round.route(), r.route());
+    assert_eq!(
+        round.written, r.written,
+        "the source's own spelling survives"
+    );
+    // No verb survives as no verb, rather than becoming a guess.
+    let bare = RouteRef { verb: None, ..r };
+    assert_eq!(bare.route(), "* /api/orders/{}/items");
+}
+
+/// The fold and the two properties, done once here for every plugin: one
+/// symbol's routes written, a symbol that states none left alone, and an
+/// account counted from what was written.
+#[test]
+fn one_fold_writes_both_properties_and_the_account() {
+    let refs = vec![
+        RouteRef {
+            symbol: "api.one".into(),
+            verb: Some(Verb::Get),
+            written: "/api/orders/${}".into(),
+            line: 3,
+        },
+        // The same route twice is one route.
+        RouteRef {
+            symbol: "api.one".into(),
+            verb: Some(Verb::Get),
+            written: "/api/orders/${}".into(),
+            line: 9,
+        },
+        RouteRef {
+            symbol: "api.one".into(),
+            verb: None,
+            written: "/health".into(),
+            line: 11,
+        },
+    ];
+    let asked = Routes::of(Side::Requests, &refs);
+
+    let mut props = Map::new();
+    assert_eq!(asked.write("api.one", &mut props), 2);
+    assert_eq!(
+        props["requests"]["$value"],
+        serde_json::json!(["* /health", "GET /api/orders/{}"])
+    );
+    assert_eq!(
+        props["requests_as_written"]["$value"],
+        serde_json::json!(["/api/orders/${}", "/health"]),
+        "the source's own spelling, beside the comparable form"
+    );
+
+    let mut none = Map::new();
+    assert_eq!(asked.write("api.two", &mut none), 0);
+    assert!(none.is_empty(), "no property rather than an empty one");
+
+    assert!(asked.note(2).unwrap().contains("2 route(s) asked for"));
+    assert_eq!(asked.note(0), None, "nothing to account for");
+}
+
+/// The declaration side writes the other pair of properties — the same fold,
+/// told apart only by which half it holds.
+#[test]
+fn the_declaration_side_writes_serves() {
+    let refs = vec![RouteRef {
+        symbol: "com.acme.CheckController.check".into(),
+        verb: Some(Verb::Get),
+        written: "/bridge/check/{id}".into(),
+        line: 42,
+    }];
+    let served = Routes::of(Side::Serves, &refs);
+    let mut props = Map::new();
+    assert_eq!(
+        served.write("com.acme.CheckController.check", &mut props),
+        1
+    );
+    assert_eq!(
+        props["serves"]["$value"],
+        serde_json::json!(["GET /bridge/check/{}"])
+    );
+    assert_eq!(
+        props["serves_as_written"]["$value"],
+        serde_json::json!(["/bridge/check/{id}"])
+    );
+    assert!(served.note(1).unwrap().contains("declared by a handler"));
+}

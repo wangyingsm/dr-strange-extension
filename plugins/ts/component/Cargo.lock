@@ -136,6 +136,7 @@ dependencies = [
 name = "dr-strange-ext"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "wit-bindgen",
 ]
@@ -154,6 +155,7 @@ dependencies = [
 name = "drsg-ts-parser"
 version = "1.0.0"
 dependencies = [
+ "dr-strange-ext",
  "serde",
  "serde_json",
  "swc_common",
