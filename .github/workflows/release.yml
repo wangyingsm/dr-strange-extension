@@ -5,6 +5,10 @@ name: Release
 #
 #   git tag rust-v2.0.0 && git push origin rust-v2.0.0
 #
+# **One tag per push.** GitHub creates no workflow event at all when a push
+# carries more than three tags, so a batch of five releases nothing and leaves
+# the tags sitting on the remote with no run to show for them.
+#
 # The release carries `<plugin>.wasm` and its sha256; the installer is
 #
 #   drsg plugin install https://github.com/<owner>/<repo>/releases/download/<tag>/<plugin>.wasm
@@ -34,11 +38,14 @@ on:
 permissions:
   contents: write # create the GitHub Release, upload assets, commit the catalog
 
-# Two plugins tagged at once would otherwise race to commit `catalog.json`.
-# Queued rather than cancelled: a superseded run here means a release whose
-# catalog entry never lands.
+# Per tag, not one group for the repository: two plugins releasing at once do
+# not need serializing, because the catalog step rebases and retries its own
+# push (see "Update the entry"). A shared group bought nothing and cost
+# releases — `cancel-in-progress: false` queues at most *one* run per group, so
+# a third tag cancels the one already waiting, and java-v2.2.0 and rust-v2.1.0
+# were both lost that way. Per tag still collapses a re-push of the same tag.
 concurrency:
-  group: release-catalog
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 env:
