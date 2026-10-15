@@ -1,0 +1,26 @@
+[package]
+name = "drsg-csharp-parser"
+description = "C# into facts — the parsing half of the drsg csharp plugin"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# tree-sitter, as for Java, Kotlin and C: no pure-Rust C# frontend exists,
+# and the grammar every editor already trusts is a better foundation than one
+# we would have to earn trust for. The C runtime and grammar compile to
+# wasm32-wasip2 under wasi-sdk's clang, the same toolchain those three use.
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-c-sharp = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The route convention (`dr_strange_ext::route`) — one definition of what a
+# declaration and a request compare against, shared with every other plugin.
+# The SDK is otherwise the component's dependency, not the parser's.
+dr-strange-ext = { path = "../../../sdk/rust" }
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"
