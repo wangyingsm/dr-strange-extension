@@ -1,0 +1,28 @@
+[package]
+name = "drsg-kotlin-parser"
+description = "Kotlin into facts — the parsing half of the drsg kotlin plugin"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+# tree-sitter, as for Java and C: no pure-Rust Kotlin frontend exists, and the
+# grammar an editor already trusts is a better foundation than one we would
+# have to earn trust for. `-ng` is the maintained grammar — the older
+# `tree-sitter-kotlin` pins tree-sitter < 0.23 and would hold the whole
+# repository back. The C runtime and grammar compile to wasm32-wasip2 under
+# wasi-sdk's clang, the same toolchain the Java and C plugins use.
+[dependencies]
+tree-sitter = "0.26"
+tree-sitter-kotlin-ng = "1.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The route convention (`dr_strange_ext::route`) — one definition of what a
+# declaration and a request compare against, shared with every other plugin.
+# The SDK is otherwise the component's dependency, not the parser's.
+dr-strange-ext = { path = "../../../sdk/rust" }
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"
