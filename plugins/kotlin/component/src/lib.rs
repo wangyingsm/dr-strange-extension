@@ -1,0 +1,111 @@
+//! The drsg kotlin plugin: the parser, wrapped for the wasm contract.
+//! Everything language-shaped lives in the parser crate, natively tested;
+//! this file only crosses the boundary.
+
+use dr_strange_ext::bindings::exports::drsg::preprocess::preprocessor::{
+    Edge, Guest, Input, Manifest, Node, Output, Report,
+};
+use dr_strange_ext::export_plugin;
+use drsg_kotlin_parser::{EXTENSIONS, FileFacts, assemble, parse_chunk, parse_document};
+
+/// Shown beside the name in UIs (`manifest.logo`): an original mark
+/// evoking the language, not its trademarked logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='#7f52ff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='3.5' y='3.5' width='17' height='17' rx='3'/><path d='M8 8v8'/><path d='M8 12l5-4M8 12l5 4' stroke='#e44857'/></svg>";
+
+struct KotlinPlugin;
+
+/// The parser reads through the host — the same adapter shape as the java
+/// plugin's.
+struct HostFiles;
+
+impl drsg_kotlin_parser::Files for HostFiles {
+    fn list(&self, suffix: &str) -> Result<Vec<String>, String> {
+        dr_strange_ext::bindings::drsg::preprocess::host::list(suffix)
+    }
+
+    fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        dr_strange_ext::bindings::drsg::preprocess::host::read(path)
+    }
+
+    fn label(&self) -> Option<String> {
+        dr_strange_ext::bindings::drsg::preprocess::host::label()
+    }
+}
+
+fn include_source(options: &[(String, String)]) -> bool {
+    options
+        .iter()
+        .any(|(k, v)| k == "include_source" && v == "true")
+}
+
+impl Guest for KotlinPlugin {
+    fn describe() -> Manifest {
+        Manifest {
+            name: "kotlin".into(),
+            // `1`: the first shape. It marks test code (`test_flag`, with a
+            // `_test_flag_confidence` the display skips), writes a declared
+            // type as a `USES_TYPE` edge rather than leaving it in a prop,
+            // and records where each declaration ends — the shape the java
+            // plugin reached at `2`, since there is no earlier Kotlin plane
+            // to stay readable for.
+            version: "1".into(),
+            extensions: EXTENSIONS.iter().map(|e| e.to_string()).collect(),
+            logo: Some(LOGO.into()),
+        }
+    }
+
+    fn parse(subject: Input, options: Vec<(String, String)>) -> Result<Vec<u8>, String> {
+        let include = include_source(&options);
+        let facts: Vec<FileFacts> = match subject {
+            Input::Files(paths) => parse_chunk(&HostFiles, &paths, include),
+            Input::Document(doc) => parse_document(&doc.name, &doc.bytes, include),
+        };
+        // The partial is ours to shape; the host shuttles it and never looks.
+        rmp_serde::to_vec(&facts).map_err(|e| format!("serializing a partial: {e}"))
+    }
+
+    fn assemble(partials: Vec<Vec<u8>>, _options: Vec<(String, String)>) -> Result<Output, String> {
+        // In the order given — the host guarantees chunk order, and order is
+        // what keeps the result independent of where the boundaries fell.
+        let mut all: Vec<FileFacts> = Vec::new();
+        for bytes in &partials {
+            let chunk: Vec<FileFacts> = rmp_serde::from_slice(bytes)
+                .map_err(|e| format!("a partial did not decode: {e}"))?;
+            all.extend(chunk);
+        }
+
+        let assembled = assemble(all);
+        let facts = (assembled.nodes.len() + assembled.edges.len()) as u32;
+        Ok(Output {
+            nodes: assembled
+                .nodes
+                .into_iter()
+                .map(|n| Node {
+                    key: n.key,
+                    label: n.label,
+                    extra_labels: n.extra_labels,
+                    properties: serde_json::Value::Object(n.props).to_string(),
+                })
+                .collect(),
+            edges: assembled
+                .edges
+                .into_iter()
+                .map(|e| Edge {
+                    src: e.src,
+                    dst: e.dst,
+                    type_: e.ty,
+                    properties: serde_json::Value::Object(e.props).to_string(),
+                })
+                .collect(),
+            prose: String::new(),
+            report: Report {
+                facts,
+                prose_chars: 0,
+                skipped: assembled.skipped as u32,
+                notes: assembled.notes,
+            },
+        })
+    }
+}
+
+export_plugin!(KotlinPlugin);
