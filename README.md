@@ -38,7 +38,7 @@ that `parse()` calls `lex()`, it knows.
 
 Those plugins live here, apart from the database on purpose: official does not
 mean lock-step. A parser ships a fix without waiting for a database release,
-and the database releases without waiting for eight toolchains.
+and the database releases without waiting for a dozen toolchains.
 
 ## Supported extensions
 
@@ -53,6 +53,8 @@ every load.
 | `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) — ESM **and** CommonJS | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=ts-v&expanded=true) |
 | `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff)'s parser | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=py-v&expanded=true) |
 | `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=java-v&expanded=true) |
+| `kotlin` | `.kt .kts` | [tree-sitter-kotlin-ng](https://github.com/tree-sitter-grammars/tree-sitter-kotlin) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=kotlin-v&expanded=true) |
+| `csharp` | `.cs` | [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=csharp-v&expanded=true) |
 | `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=c-v&expanded=true) |
 | `web` | `.html .htm .css` | tree-sitter html/css/js — one plugin, so `class="btn"` binds to the stylesheet that defines `.btn` | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=web-v&expanded=true) |
 | `toml` | `.toml` | [toml](https://crates.io/crates/toml) — the smallest plugin that is still a plugin | [latest](https://github.com/wangyingsm/dr-strange-extension/releases?q=toml-v&expanded=true) |
@@ -300,7 +302,7 @@ Contributions are welcome:
   tree-sitter — wrapped as `plugins/<name>/{parser,component}`).
 - **Parser fixes** should come with a native test that fails before and passes
   after; CI runs every parser's suite, an uncached `clippy -D warnings`, and
-  builds all eight components to `wasm32-wasip2` on every push.
+  builds every component to `wasm32-wasip2` on every push.
 - **Contract changes** are the one thing that moves in lock-step with the
   database — open the discussion on the
   [dr-strange](https://github.com/wangyingsm/dr-strange) side first.

@@ -34,7 +34,7 @@
 不需要推断 `parse()` 调用了 `lex()`，它本来就知道。
 
 这些插件独立于数据库存放于此，是有意为之：官方并不意味着同步发布。解析器
-修复问题无需等待数据库发版，数据库发版也无需等待八条工具链。
+修复问题无需等待数据库发版，数据库发版也无需等待十余条工具链。
 
 ## 支持的扩展
 
@@ -48,6 +48,8 @@
 | `ts` | `.ts .tsx .mts .cts .js .jsx .mjs .cjs` | [swc](https://swc.rs) —— 同时支持 ESM 与 CommonJS | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=ts-v&expanded=true) |
 | `py` | `.py .pyi .pyw` | [ruff](https://github.com/astral-sh/ruff) 的解析器 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=py-v&expanded=true) |
 | `java` | `.java` | [tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=java-v&expanded=true) |
+| `kotlin` | `.kt .kts` | [tree-sitter-kotlin-ng](https://github.com/tree-sitter-grammars/tree-sitter-kotlin) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=kotlin-v&expanded=true) |
+| `csharp` | `.cs` | [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=csharp-v&expanded=true) |
 | `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=c-v&expanded=true) |
 | `web` | `.html .htm .css` | tree-sitter html/css/js —— 一个插件同时处理两种语言，`class="btn"` 才能绑定到定义 `.btn` 的样式表 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=web-v&expanded=true) |
 | `toml` | `.toml` | [toml](https://crates.io/crates/toml) —— 最小的、但仍然完整的插件 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=toml-v&expanded=true) |
@@ -275,8 +277,8 @@ canonical 一致）；并以原生方式测试你的解析器——所有官方�
   选一个成熟的、最好是该语言官方级的解析器——syn、swc、ruff、tree-sitter——
   包装为 `plugins/<name>/{parser,component}`）。
 - **解析器修复**请附带一个"修复前失败、修复后通过"的原生测试；CI 会在每次
-  push 上运行所有解析器的测试套件、无缓存的 `clippy -D warnings`，并把全部
-  八个组件构建到 `wasm32-wasip2`。
+  push 上运行所有解析器的测试套件、无缓存的 `clippy -D warnings`，并把每个
+  组件构建到 `wasm32-wasip2`。
 - **契约变更**是唯一必须与数据库同步演进的部分——请先在
   [dr-strange](https://github.com/wangyingsm/dr-strange) 侧发起讨论。
 
