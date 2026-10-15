@@ -48,6 +48,24 @@
       "min_drsg": "2.0.0"
     },
     {
+      "name": "kotlin",
+      "version": "1.0.0",
+      "claims": ".kt .kts",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/kotlin-v1.0.0/kotlin.wasm",
+      "sha256": "1b577fd74b3f26eefd89b912ba6772c8c0932e209f89135f3dda4d175a4fd57e",
+      "contract": "1.0.0",
+      "min_drsg": "2.0.0"
+    },
+    {
+      "name": "csharp",
+      "version": "1.0.0",
+      "claims": ".cs",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/csharp-v1.0.0/csharp.wasm",
+      "sha256": "8054d88eaf3caea06b44ffcf095d1ab74c1c33b37420115f34c43a23199bad22",
+      "contract": "1.0.0",
+      "min_drsg": "2.0.0"
+    },
+    {
       "name": "c",
       "version": "2.0.0",
       "claims": ".c .h",
