@@ -95,6 +95,21 @@ c-plugin:
 java-plugin:
     cd plugins/java/component &&       CC_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/clang       AR_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/llvm-ar       CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/share/wasi-sysroot"       cargo build --release --target wasm32-wasip2
 
+# Kotlin and C# are tree-sitter grammars too, and build the same way.
+kotlin-plugin:
+    cd plugins/kotlin/component && \
+      CC_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/clang \
+      AR_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/llvm-ar \
+      CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/share/wasi-sysroot" \
+      cargo build --release --target wasm32-wasip2
+
+csharp-plugin:
+    cd plugins/csharp/component && \
+      CC_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/clang \
+      AR_wasm32_wasip2=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/bin/llvm-ar \
+      CFLAGS_wasm32_wasip2="--sysroot=${WASI_SDK:-$HOME/.local/opt/wasi-sdk-33.0-x86_64-linux}/share/wasi-sysroot" \
+      cargo build --release --target wasm32-wasip2
+
 toml-plugin:
     cd plugins/toml && cargo build --release --target wasm32-wasip2
 
@@ -121,6 +136,8 @@ test:
     cd plugins/ts/parser && cargo test
     cd plugins/py/parser && cargo test
     cd plugins/java/parser && cargo test
+    cd plugins/kotlin/parser && cargo test
+    cd plugins/csharp/parser && cargo test
     cd plugins/c/parser && cargo test
     cd plugins/web/parser && cargo test
     cd plugins/git/parser && cargo test

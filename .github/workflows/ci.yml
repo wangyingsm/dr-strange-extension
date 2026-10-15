@@ -62,6 +62,8 @@ jobs:
             plugins/ts/parser
             plugins/py/parser
             plugins/java/parser
+            plugins/kotlin/parser
+            plugins/csharp/parser
             plugins/c/parser
             plugins/web/parser
             plugins/git/parser
@@ -74,7 +76,8 @@ jobs:
         run: |
           for dir in sdk/rust \
                      plugins/rust/parser plugins/ts/parser plugins/py/parser \
-                     plugins/java/parser plugins/c/parser plugins/web/parser \
+                     plugins/java/parser plugins/kotlin/parser \
+                     plugins/csharp/parser plugins/c/parser plugins/web/parser \
                      plugins/git/parser plugins/toml plugins/deps \
                      plugins/xml; do
             echo "::group::$dir"
@@ -116,6 +119,8 @@ jobs:
             plugins/ts/component
             plugins/py/component
             plugins/java/component
+            plugins/kotlin/component
+            plugins/csharp/component
             plugins/c/component
             plugins/web/component
             plugins/git/component
@@ -145,7 +150,7 @@ jobs:
       - uses: extractions/setup-just@v3
       - name: Build every component
         run: |
-          for plugin in toml deps xml rust ts py c java web go git; do
+          for plugin in toml deps xml rust ts py c java kotlin csharp web go git; do
             echo "::group::$plugin"
             just "${plugin}-plugin"
             echo "::endgroup::"
@@ -160,6 +165,8 @@ jobs:
                  plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm \
                  plugins/c/component/target/wasm32-wasip2/release/drsg_plugin_c.wasm \
                  plugins/java/component/target/wasm32-wasip2/release/drsg_plugin_java.wasm \
+                 plugins/kotlin/component/target/wasm32-wasip2/release/drsg_plugin_kotlin.wasm \
+                 plugins/csharp/component/target/wasm32-wasip2/release/drsg_plugin_csharp.wasm \
                  plugins/web/component/target/wasm32-wasip2/release/drsg_plugin_web.wasm \
                  plugins/go/component/go.wasm \
                  plugins/git/component/target/wasm32-wasip2/release/drsg_plugin_git.wasm

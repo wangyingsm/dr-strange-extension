@@ -28,6 +28,8 @@ on:
       - "ts-v*"
       - "py-v*"
       - "java-v*"
+      - "kotlin-v*"
+      - "csharp-v*"
       - "c-v*"
       - "web-v*"
       - "toml-v*"
@@ -69,7 +71,7 @@ jobs:
             toml|deps|xml)
                    artifact="plugins/$plugin/target/wasm32-wasip2/release/drsg_plugin_$plugin.wasm" ;;
             go)    artifact="plugins/go/component/go.wasm" ;;
-            rust|ts|py|c|java|web|git)
+            rust|ts|py|c|java|kotlin|csharp|web|git)
                    artifact="plugins/$plugin/component/target/wasm32-wasip2/release/drsg_plugin_$plugin.wasm" ;;
             *)     echo "unknown plugin in tag: $tag"; exit 1 ;;
           esac
@@ -96,7 +98,7 @@ jobs:
           tar -xzf /tmp/wasm-tools.tar.gz -C "$HOME"
           echo "$HOME/wasm-tools-${WASM_TOOLS_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
       - name: Install wasi-sdk
-        if: contains(fromJSON('["c", "java", "web"]'), steps.meta.outputs.plugin)
+        if: contains(fromJSON('["c", "java", "kotlin", "csharp", "web"]'), steps.meta.outputs.plugin)
         run: |
           curl -sSfL -o /tmp/wasi-sdk.tar.gz \
             "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION%%.*}/wasi-sdk-${WASI_SDK_VERSION}-x86_64-linux.tar.gz"
