@@ -70,6 +70,7 @@ jobs:
             plugins/toml
             plugins/deps
             plugins/compose
+            plugins/k8s
             plugins/xml
       # Standalone crates, deliberately (each ships at its own pace), so the
       # gate loops rather than relying on a workspace.
@@ -80,7 +81,7 @@ jobs:
                      plugins/java/parser plugins/kotlin/parser \
                      plugins/csharp/parser plugins/c/parser plugins/web/parser \
                      plugins/git/parser plugins/toml plugins/deps \
-                     plugins/compose plugins/xml; do
+                     plugins/compose plugins/k8s plugins/xml; do
             echo "::group::$dir"
             (cd "$dir" && cargo fmt --check && cargo clippy --all-targets && cargo test)
             echo "::endgroup::"
@@ -128,6 +129,7 @@ jobs:
             plugins/toml
             plugins/deps
             plugins/compose
+            plugins/k8s
             plugins/xml
       - uses: actions/setup-go@v5
         with:
@@ -152,7 +154,7 @@ jobs:
       - uses: extractions/setup-just@v3
       - name: Build every component
         run: |
-          for plugin in toml deps compose xml rust ts py c java kotlin csharp web go git; do
+          for plugin in toml deps compose k8s xml rust ts py c java kotlin csharp web go git; do
             echo "::group::$plugin"
             just "${plugin}-plugin"
             echo "::endgroup::"
@@ -162,6 +164,7 @@ jobs:
           ls -la plugins/toml/target/wasm32-wasip2/release/drsg_plugin_toml.wasm \
                  plugins/deps/target/wasm32-wasip2/release/drsg_plugin_deps.wasm \
                  plugins/compose/target/wasm32-wasip2/release/drsg_plugin_compose.wasm \
+                 plugins/k8s/target/wasm32-wasip2/release/drsg_plugin_k8s.wasm \
                  plugins/xml/target/wasm32-wasip2/release/drsg_plugin_xml.wasm \
                  plugins/rust/component/target/wasm32-wasip2/release/drsg_plugin_rust.wasm \
                  plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm \

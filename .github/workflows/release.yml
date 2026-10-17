@@ -36,6 +36,8 @@ on:
       - "deps-v*"
       - "git-v*"
       - "xml-v*"
+      - "compose-v*"
+      - "k8s-v*"
 
 permissions:
   contents: write # create the GitHub Release, upload assets, commit the catalog
@@ -68,7 +70,7 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           plugin="${tag%%-v*}"
           case "$plugin" in
-            toml|deps|xml|compose)
+            toml|deps|xml|compose|k8s)
                    artifact="plugins/$plugin/target/wasm32-wasip2/release/drsg_plugin_$plugin.wasm" ;;
             go)    artifact="plugins/go/component/go.wasm" ;;
             rust|ts|py|c|java|kotlin|csharp|web|git)
