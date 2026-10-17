@@ -171,6 +171,42 @@ fn every_edge_has_endpoints(out: &Assembled) {
     }
 }
 
+/// A macro invocation in a body is marked, the way an item-position one is.
+/// Nothing expands it — that is the compiler's, as `macro_calls` explains —
+/// but a body that hides a call behind a macro must not read as a body that
+/// calls nothing.
+#[test]
+fn an_expression_macro_is_marked_not_silent() {
+    let t = Tree::new("exprmacro");
+    t.write("Cargo.toml", "[package]\nname = \"m\"\n").write(
+        "src/lib.rs",
+        "pub fn normalize(v: &str) -> String { v.to_string() }\n\n\
+         macro_rules! normalized {\n    ($v:expr) => { normalize($v) };\n}\n\n\
+         pub fn via_macro(v: &str) -> String { normalized!(v) }\n\n\
+         pub fn via_std(v: &str) -> String { format!(\"{v}\") }\n",
+    );
+
+    let a = run(&t);
+    let invokes: Vec<String> = a
+        .edges
+        .iter()
+        .filter(|e| e.ty == "INVOKES")
+        .map(|e| format!("{} -> {}", e.src, e.dst))
+        .collect();
+
+    // The macro this tree declares is named at the call site.
+    assert!(
+        invokes.iter().any(|e| e == "m::via_macro -> m::normalized"),
+        "{invokes:?}"
+    );
+    // A std macro cannot expand to a call on anything here, so marking it
+    // would be noise rather than information.
+    assert!(
+        !invokes.iter().any(|e| e.starts_with("m::via_std")),
+        "{invokes:?}"
+    );
+}
+
 /// An item's identity is its module path, not the file it lives in — that is
 /// what a Rust programmer calls it, and what a model will recognise.
 #[test]

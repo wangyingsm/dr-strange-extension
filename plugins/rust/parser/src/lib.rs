@@ -217,6 +217,20 @@ pub struct FileFacts {
     /// assemble.
     #[serde(default)]
     cfg_test_scopes: Vec<String>,
+    /// `(caller, macro path, arguments, line)` for each invocation in
+    /// *expression* position whose macro this tree declares.
+    ///
+    /// Item position was marked and expression position was silent, which is
+    /// the one blind spot this parser had without saying so: `normalized!(v)`
+    /// in a body produced no edge at all, so a reader could not tell the call
+    /// it expands to from a function that calls nothing. Still not expanded —
+    /// that is the compiler's job, as the item-position note explains — but
+    /// now findable.
+    ///
+    /// Only a macro declared in this tree: a `println!` cannot expand to a
+    /// call on anything here, so marking it would be noise, not information.
+    #[serde(default)]
+    pub expr_macros: Vec<(String, String, String, u64)>,
     /// `(module, macro path, arguments)` for each item-position invocation —
     /// the places where items exist that this parse cannot see.
     macro_calls: Vec<(String, String, String, u64)>,
@@ -984,6 +998,9 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
             mount: mount.clone(),
         });
     }
+    for (path, args, line) in body.macros {
+        f.expr_macros.push((caller.to_string(), path, args, line));
+    }
 }
 
 /// A closure argument's parameters: each name, which parameter it is, the
@@ -1266,6 +1283,9 @@ struct BodyFacts {
     requests: Vec<Asked>,
     /// The routers this body mounts under a path, likewise waiting.
     mounts: Vec<Mounted>,
+    /// `(macro path as written, arguments, line)` for each invocation in
+    /// expression position. Marked, not expanded — see [`FileFacts::expr_macros`].
+    macros: BTreeSet<(String, String, u64)>,
 }
 
 /// One route a call states, read before the body's own key is known: an impl
@@ -1653,6 +1673,16 @@ fn call_names(block: &syn::Block) -> BodyFacts {
             if spawner.is_some() {
                 self.spawns.pop();
             }
+        }
+        /// A macro invocation in expression position. Recorded so the body
+        /// says one happened; nothing here expands it.
+        fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+            self.facts.macros.insert((
+                path_of(&node.mac.path),
+                tidy(&node.mac.tokens.to_string()),
+                line_of(&node.mac.path),
+            ));
+            syn::visit::visit_expr_macro(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let spawner = spawner_shape(&node.method.to_string());
@@ -2664,6 +2694,34 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 note_external(&mut external, &target, Some("Macro"));
             }
             let mut e = edge_at(module, &target, "INVOKES", *line);
+            if !args.is_empty() {
+                e.props.insert(
+                    "arguments".into(),
+                    json!({
+                        "$desc": "what the macro was given — usually the shape of what it generated",
+                        "$value": Value::String(args.clone()),
+                    }),
+                );
+            }
+            impl_edges.push(e);
+            macro_invocations += 1;
+        }
+
+        // Expression-position invocations, for a macro this tree declares:
+        // the same `INVOKES` edge item position gets, so a body that hides a
+        // call behind a macro is findable rather than silent.
+        for (caller, path, args, line) in &f.expr_macros {
+            let module = f.scopes.get(caller).map(String::as_str).unwrap_or(caller);
+            let target = resolve_path(
+                &expand_path(path, &imports, module),
+                module,
+                &aliases,
+                &declared,
+            );
+            if !declared.contains(&target) {
+                continue;
+            }
+            let mut e = edge_at(caller, &target, "INVOKES", *line);
             if !args.is_empty() {
                 e.props.insert(
                     "arguments".into(),
