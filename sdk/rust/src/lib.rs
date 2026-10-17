@@ -77,6 +77,7 @@
 /// The HTTP route convention — a vocabulary rather than a format reader, and
 /// the one thing every language's plugin has to agree on before a request can
 /// be matched to the declaration that serves it.
+pub mod ops;
 pub mod route;
 
 /// The generated bindings.
