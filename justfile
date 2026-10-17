@@ -119,6 +119,9 @@ compose-plugin:
 k8s-plugin:
     cd plugins/k8s && cargo build --release --target wasm32-wasip2
 
+terraform-plugin:
+    cd plugins/terraform && cargo build --release --target wasm32-wasip2
+
 # XML, by the dialect a file declares. Pure Rust like the two above: quick-xml
 # needs no C, so this one builds without wasi-sdk.
 xml-plugin:
