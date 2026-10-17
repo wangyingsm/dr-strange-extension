@@ -1057,7 +1057,10 @@ fn test_files_are_flagged_by_the_names_runners_collect() {
 fn a_parameter_property_is_a_field_of_its_class() {
     let a = run(&tree(vec![
         ("package.json", "{\"name\": \"p\"}"),
-        ("src/store.ts", "export interface Store { get(k: string): string; }\n"),
+        (
+            "src/store.ts",
+            "export interface Store { get(k: string): string; }\n",
+        ),
         (
             "src/svc.ts",
             "import { Store } from './store';\nexport class Svc {\n               constructor(private store: Store, label: string) {}\n               load(k: string): string { return this.store.get(k); }\n}\n",
@@ -1065,7 +1068,12 @@ fn a_parameter_property_is_a_field_of_its_class() {
     ]));
 
     // The class names the type, not the constructor: a field was declared.
-    assert!(has_edge(&a, "p/src/svc.Svc", "USES_TYPE", "p/src/store.Store"));
+    assert!(has_edge(
+        &a,
+        "p/src/svc.Svc",
+        "USES_TYPE",
+        "p/src/store.Store"
+    ));
     assert!(!has_edge(
         &a,
         "p/src/svc.Svc.constructor",
@@ -1080,7 +1088,12 @@ fn a_parameter_property_is_a_field_of_its_class() {
     // The field also types `this.store`, which is what lets a call through it
     // be resolved at all. Whether the call to an *interface* method becomes an
     // edge is a separate question, pinned by its own test.
-    assert!(has_edge(&a, "p/src/svc.Svc", "USES_TYPE", "p/src/store.Store"));
+    assert!(has_edge(
+        &a,
+        "p/src/svc.Svc",
+        "USES_TYPE",
+        "p/src/store.Store"
+    ));
 }
 
 /// A declared type is a dependency as surely as a call is — where TypeScript
