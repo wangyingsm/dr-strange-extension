@@ -118,6 +118,24 @@
       "sha256": "2f93d9bac5e1709935660f7a574c214b024e9beccd3040905d9a848a5bfdbe06",
       "contract": "1.0.0",
       "min_drsg": "2.7.0"
+    },
+    {
+      "name": "compose",
+      "version": "1.0.0",
+      "claims": "Docker Compose files",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/compose-v1.0.0/compose.wasm",
+      "sha256": "e988e6e9361f0893250803853db3b9e662b371b01b81d41d7c81e2f2c9ee7896",
+      "contract": "1.0.0",
+      "min_drsg": "2.7.0"
+    },
+    {
+      "name": "k8s",
+      "version": "1.0.0",
+      "claims": "Kubernetes manifests",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/k8s-v1.0.0/k8s.wasm",
+      "sha256": "ad59ddc7a96b4f3ccac2faee0cfec145eb9c2bdecbca28d28b1b909a19fcf987",
+      "contract": "1.0.0",
+      "min_drsg": "2.7.0"
     }
   ]
 }
