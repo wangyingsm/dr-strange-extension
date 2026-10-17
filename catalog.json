@@ -49,10 +49,10 @@
     },
     {
       "name": "kotlin",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "claims": ".kt .kts",
-      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/kotlin-v1.0.0/kotlin.wasm",
-      "sha256": "1b577fd74b3f26eefd89b912ba6772c8c0932e209f89135f3dda4d175a4fd57e",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/kotlin-v1.1.0/kotlin.wasm",
+      "sha256": "27160942425d09c822d4589243fb7833b7457b49198b516081da63d2f47e1616",
       "contract": "1.0.0",
       "min_drsg": "2.0.0"
     },
