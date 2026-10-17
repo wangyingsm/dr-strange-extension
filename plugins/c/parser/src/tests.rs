@@ -601,6 +601,60 @@ fn a_framework_header_flags_its_translation_unit_and_nothing_else() {
     }
 }
 
+/// `typedef struct { … } Name` has no tag, so its fields had nowhere to
+/// belong and went unrecorded — the shape most C in the wild declares a
+/// struct in, including every decorator that embeds another type.
+#[test]
+fn an_anonymous_typedef_struct_owns_its_fields() {
+    let a = run(vec![
+        (
+            "store.h",
+            "typedef struct Store Store;\nstruct Store { int x; };\n",
+        ),
+        (
+            "audit.c",
+            "#include \"store.h\"\ntypedef struct {\n\tStore base;\n\tStore *inner;\n\tint n;\n} AuditStore;\n",
+        ),
+        (
+            "tagged.c",
+            "#include \"store.h\"\ntypedef struct keeper {\n\tStore *held;\n} Keeper;\n",
+        ),
+    ]);
+
+    // The typedef name owns them, through a value and through a pointer.
+    assert!(has_edge(
+        &a,
+        "audit.c::AuditStore",
+        "USES_TYPE",
+        "store.h::Store"
+    ));
+    assert_eq!(
+        edge(&a, "USES_TYPE", "store.h::Store").props["role"]["$value"]
+            .as_str()
+            .unwrap(),
+        "field"
+    );
+    // A tagged struct still belongs to its tag, not to the alias.
+    assert!(has_edge(
+        &a,
+        "tagged.c::keeper",
+        "USES_TYPE",
+        "store.h::Store"
+    ));
+    assert!(!has_edge(
+        &a,
+        "tagged.c::Keeper",
+        "USES_TYPE",
+        "store.h::Store"
+    ));
+    // A primitive field is nobody's edge.
+    assert!(
+        !a.edges
+            .iter()
+            .any(|e| e.ty == "USES_TYPE" && e.dst.ends_with("::int"))
+    );
+}
+
 /// A declared type is a dependency as surely as a call is — and in C the
 /// binding follows the linker's model, the way calls do: the file's own
 /// declaration first, then the one the tree holds. Primitives name no

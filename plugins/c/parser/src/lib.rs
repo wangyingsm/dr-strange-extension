@@ -593,6 +593,17 @@ impl Walker<'_> {
             props.insert("line".into(), Value::from(line));
             props.insert("end_line".into(), Value::from(self.end_line(node)));
             let key = format!("{}::{name}", self.file_key);
+            // An anonymous struct's fields have no tag to belong to, so they
+            // belong to the name this typedef gives it. A tagged one is
+            // already recorded under the tag by `record_type`.
+            if d.kind() == "type_identifier"
+                && let Some(t) = node.child_by_field_name("type")
+                && matches!(t.kind(), "struct_specifier" | "union_specifier")
+                && t.child_by_field_name("name").is_none()
+                && let Some(body) = t.child_by_field_name("body")
+            {
+                self.field_types(&key, body);
+            }
             self.push_decl(key, "TypeAlias", props, line, true, false, name);
         }
     }
@@ -610,6 +621,44 @@ impl Walker<'_> {
             }
             _ => None,
         }
+    }
+
+    /// A struct or union body's fields: each `name: type` as written, and a
+    /// type reference for each, owned by `owner`.
+    ///
+    /// Shared with [`Self::typedef`], because `typedef struct { … } Name` has
+    /// no tag for [`Self::record_type`] to hang the fields on — which is how
+    /// the fields of every anonymous struct went unrecorded, the shape most C
+    /// in the wild is written in.
+    fn field_types(&mut self, owner: &str, body: TsNode) -> Vec<String> {
+        let mut fields: Vec<String> = Vec::new();
+        let mut cursor = body.walk();
+        for m in body.named_children(&mut cursor) {
+            if m.kind() != "field_declaration" {
+                continue;
+            }
+            let fty = m
+                .child_by_field_name("type")
+                .map(|t| self.text(t))
+                .unwrap_or_default();
+            let mut fc = m.walk();
+            for fd in m.named_children(&mut fc) {
+                if matches!(
+                    fd.kind(),
+                    "field_identifier"
+                        | "pointer_declarator"
+                        | "array_declarator"
+                        | "function_declarator"
+                ) && let Some((fname, _)) = self.declarator_name_field(fd)
+                {
+                    if let Some(t) = m.child_by_field_name("type") {
+                        self.type_ref(owner, "field", &fname, t);
+                    }
+                    fields.push(format!("{fname}: {fty}"));
+                }
+            }
+        }
+        fields
     }
 
     /// Record the type `node` names as one type position of `owner`.
@@ -669,33 +718,8 @@ impl Walker<'_> {
                 );
             }
         } else {
-            let mut fields: Vec<String> = Vec::new();
-            let mut cursor = body.walk();
-            for m in body.named_children(&mut cursor) {
-                if m.kind() == "field_declaration" {
-                    let fty = m
-                        .child_by_field_name("type")
-                        .map(|t| self.text(t))
-                        .unwrap_or_default();
-                    let mut fc = m.walk();
-                    for fd in m.named_children(&mut fc) {
-                        if matches!(
-                            fd.kind(),
-                            "field_identifier"
-                                | "pointer_declarator"
-                                | "array_declarator"
-                                | "function_declarator"
-                        ) && let Some((fname, _)) = self.declarator_name_field(fd)
-                        {
-                            if let Some(t) = m.child_by_field_name("type") {
-                                let owner = format!("{}::{name}", self.file_key);
-                                self.type_ref(&owner, "field", &fname, t);
-                            }
-                            fields.push(format!("{fname}: {fty}"));
-                        }
-                    }
-                }
-            }
+            let owner = format!("{}::{name}", self.file_key);
+            let fields = self.field_types(&owner, body);
             if !fields.is_empty() {
                 props.insert(
                     "fields".into(),
