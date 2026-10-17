@@ -1,0 +1,24 @@
+[package]
+name = "drsg-plugin-compose"
+description = "A dr-strange preprocessor plugin for Docker Compose — services, images, config and the links between them"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK and a YAML loader, and nothing else of ours — the position a
+# third-party author is in.
+[dependencies]
+dr-strange-ext = { path = "../../sdk/rust" }
+# A loader rather than serde: a Compose file's values are kept as written,
+# the way the toml plugin keeps a TOML pair, so `${TAG:-latest}` stays the
+# string the author typed instead of being resolved to something it is not.
+yaml-rust2 = { version = "0.13", default-features = false }
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"
