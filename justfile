@@ -113,6 +113,9 @@ csharp-plugin:
 toml-plugin:
     cd plugins/toml && cargo build --release --target wasm32-wasip2
 
+compose-plugin:
+    cd plugins/compose && cargo build --release --target wasm32-wasip2
+
 # XML, by the dialect a file declares. Pure Rust like the two above: quick-xml
 # needs no C, so this one builds without wasi-sdk.
 xml-plugin:
