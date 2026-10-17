@@ -1,0 +1,27 @@
+[package]
+name = "drsg-plugin-k8s"
+description = "A dr-strange preprocessor plugin for Kubernetes manifests — workloads, services, routes and config"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK and a YAML loader, and nothing else of ours. The image convention
+# comes from the SDK (`ops`), so this plugin and the Compose one cannot
+# disagree about what a reference says.
+[dependencies]
+dr-strange-ext = { path = "../../sdk/rust" }
+yaml-rust2 = { version = "0.13", default-features = false }
+# A Service and the Deployment it selects are routinely in different files,
+# so the answer spans chunks: this plugin implements `Guest` itself and owns
+# its partial format, rather than taking `simple_plugin!`'s per-chunk one.
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"
