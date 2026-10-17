@@ -515,6 +515,7 @@ func (w *walker) funcDecl(d *ast.FuncDecl) {
 	w.node(parent, key, label, props, w.line(d))
 	w.calls(key, d.Body)
 	w.chans(key, d.Body)
+	w.literalTypes(key, d.Body)
 
 	// Receiver-typing inputs: the declared first result (what `x := f()`
 	// makes x), the typed parameters, and the body's own stated bindings.
@@ -1297,6 +1298,27 @@ func typeNames(e ast.Expr) []TypeRef {
 	}
 	walk(e)
 	return out
+}
+
+// literalTypes records the type every composite literal in a body names, as
+// a type position of the declaration that contains it.
+//
+// `&Service{store: &AuditStore{inner: &MemStore{}}}` names three types, and
+// nesting is why the walk is its own pass: only the outermost literal is an
+// initializer, so receiver typing sees one of the three while the function
+// depends on all of them. A literal's *field names* are not types and are
+// not walked; its type expression is, through the same [typeNames] as a
+// declaration, so `[]Job{...}` depends on `Job`.
+func (w *walker) literalTypes(owner string, body *ast.BlockStmt) {
+	if body == nil {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.CompositeLit); ok && lit.Type != nil {
+			w.typeRefs(owner, "literal", "", lit.Type, w.line(lit))
+		}
+		return true
+	})
 }
 
 // typeRefs records every named type `e` mentions as one position of `owner`.

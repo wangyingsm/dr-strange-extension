@@ -1043,6 +1043,47 @@ func TestTestFilesAreFlaggedByTheBuildRule(t *testing.T) {
 }
 
 // A declared type is a dependency as surely as a call is: fields, parameters
+// A composite literal names a type, and nesting means only the outermost one
+// is an initializer — so a function that builds `&A{inner: &B{}}` depends on
+// both, which the receiver-typing pass alone would never say.
+func TestCompositeLiteralsNameTheirTypes(t *testing.T) {
+	a := run(t, mapFiles{files: map[string]string{
+		"go.mod": "module m\n",
+		"a.go": "package m\n\n" +
+			"type Job struct{ ID int }\n\n" +
+			"type Inner struct{ J *Job }\n\n" +
+			"type Outer struct{ I *Inner }\n\n" +
+			"func Build() *Outer {\n" +
+			"\treturn &Outer{I: &Inner{J: &Job{ID: 1}}}\n" +
+			"}\n\n" +
+			"func Slice() []Job { return []Job{{ID: 2}} }\n",
+	}})
+
+	has := func(src, dst string) bool {
+		for _, e := range a.Edges {
+			if e.Type == "USES_TYPE" && e.Src == src && e.Dst == dst {
+				return true
+			}
+		}
+		return false
+	}
+
+	// All three, not just the one assigned.
+	for _, dst := range []string{"m.Outer", "m.Inner", "m.Job"} {
+		if !has("m.Build", dst) {
+			t.Errorf("Build → %s: no USES_TYPE edge", dst)
+		}
+	}
+	// Through a slice's element type, as a declaration would be.
+	if !has("m.Slice", "m.Job") {
+		t.Error("Slice → Job: no USES_TYPE edge")
+	}
+	// A field name inside a literal is not a type.
+	if has("m.Build", "m.I") || has("m.Build", "m.ID") {
+		t.Error("a literal's field name was taken for a type")
+	}
+}
+
 // and results say so, through slices, maps, pointers and channels alike —
 // folded to one edge per pair carrying the union of the positions.
 func TestDeclaredTypesBecomeUsesTypeEdges(t *testing.T) {
