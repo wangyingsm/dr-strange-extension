@@ -243,6 +243,12 @@ pub struct FileFacts {
     /// in the same package reaches without a receiver.
     #[serde(default)]
     pub top_functions: Vec<(String, String)>,
+    /// `(receiver type as written, simple name, key)` for every extension
+    /// function. Kotlin dispatches these on the receiver's *static* type, so
+    /// the pair is all a call site needs: `value.shout()` on a `String` is a
+    /// call to whichever `String.shout` is in scope, decided without types.
+    #[serde(default)]
+    pub extensions: Vec<(String, String, String)>,
     /// The dependencies this file's types take by injection.
     #[serde(default)]
     pub injections: Vec<Injection>,

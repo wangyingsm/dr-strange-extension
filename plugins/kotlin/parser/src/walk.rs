@@ -604,8 +604,14 @@ impl Walker<'_> {
         // An extension receiver is written before the name, and is the type
         // the function extends.
         if let Some(recv) = self.extension_receiver(node) {
-            props.insert("receiver".into(), Value::String(self.text(recv)));
+            let written = self.text(recv);
+            props.insert("receiver".into(), Value::String(written.clone()));
             self.type_refs(key, "receiver", "", recv);
+            // Dispatched on the receiver's static type, so the call site can
+            // be resolved from the name alone — see `FileFacts::extensions`.
+            self.facts
+                .extensions
+                .push((written, name.to_string(), key.to_string()));
         }
         props
     }

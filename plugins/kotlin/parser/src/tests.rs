@@ -603,6 +603,32 @@ fn a_member_import_binds_the_name() {
 
 // ---- types a declaration is typed by --------------------------------------
 
+/// An extension function is dispatched on the receiver's static type, so
+/// `value.shout()` resolves without a checker — the one call shape Kotlin
+/// settles by name that was being counted unresolved.
+#[test]
+fn an_extension_function_resolves_on_its_receiver() {
+    let a = run(vec![(
+        "src/Dispatch.kt",
+        "package p\n\nobject Text {\n    fun clean(s: String): String = s\n}\n\n         object Dispatch {\n    fun String.shout(): String = Text.clean(this)\n\n             fun viaExtension(v: String): String = v.shout()\n\n             fun viaMissing(v: String): String = v.nosuch()\n}\n",
+    )]);
+
+    // The extension's own key is the target: it lives on the object that
+    // declares it, not on String.
+    // The extension's own key is the target: it lives on the object that
+    // declares it, not on String.
+    assert!(has_edge(
+        &a,
+        "p.Dispatch.viaExtension",
+        "CALLS",
+        "p.Dispatch.shout"
+    ));
+    // A name that is neither a member nor an extension stays unresolved.
+    assert!(!a.edges.iter().any(|e| e.ty == "CALLS"
+        && e.src == "p.Dispatch.viaMissing"
+        && e.dst.ends_with(".nosuch")));
+}
+
 /// A declared type is a dependency: a property, a parameter, a return and an
 /// extension receiver each get a `USES_TYPE` edge with the position on it.
 #[test]
