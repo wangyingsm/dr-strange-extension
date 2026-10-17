@@ -1050,6 +1050,39 @@ fn test_files_are_flagged_by_the_names_runners_collect() {
     }
 }
 
+/// A parameter property declares a field, so its type belongs to the class
+/// and types `this.store` — the shorthand most TypeScript services are
+/// written with, and which said nothing at all until it was walked.
+#[test]
+fn a_parameter_property_is_a_field_of_its_class() {
+    let a = run(&tree(vec![
+        ("package.json", "{\"name\": \"p\"}"),
+        ("src/store.ts", "export interface Store { get(k: string): string; }\n"),
+        (
+            "src/svc.ts",
+            "import { Store } from './store';\nexport class Svc {\n               constructor(private store: Store, label: string) {}\n               load(k: string): string { return this.store.get(k); }\n}\n",
+        ),
+    ]));
+
+    // The class names the type, not the constructor: a field was declared.
+    assert!(has_edge(&a, "p/src/svc.Svc", "USES_TYPE", "p/src/store.Store"));
+    assert!(!has_edge(
+        &a,
+        "p/src/svc.Svc.constructor",
+        "USES_TYPE",
+        "p/src/store.Store"
+    ));
+    assert_eq!(
+        text(&edge(&a, "USES_TYPE", "p/src/store.Store").props["role"]["$value"]),
+        "field"
+    );
+
+    // The field also types `this.store`, which is what lets a call through it
+    // be resolved at all. Whether the call to an *interface* method becomes an
+    // edge is a separate question, pinned by its own test.
+    assert!(has_edge(&a, "p/src/svc.Svc", "USES_TYPE", "p/src/store.Store"));
+}
+
 /// A declared type is a dependency as surely as a call is — where TypeScript
 /// wrote the annotation. Fields, parameters and returns say so, through array
 /// and generic arguments, folded to one edge per pair.

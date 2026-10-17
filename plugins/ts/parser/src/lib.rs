@@ -1446,6 +1446,7 @@ impl Walker<'_> {
                     self.facts
                         .class_methods
                         .push((name.to_string(), "constructor".into()));
+                    self.ctor_params(&key, &mkey, &ctor.params);
                     if let Some(body) = &ctor.body {
                         self.collect_calls(&mkey, body, Some((name, &key)));
                     }
@@ -1454,6 +1455,42 @@ impl Walker<'_> {
             }
         }
         self.class_routes(&key, c);
+    }
+
+    /// A constructor's parameters: their declared types, and for a parameter
+    /// property (`constructor(private store: Store)`) the field it declares.
+    ///
+    /// The shorthand is a field declaration written in the parameter list, so
+    /// its type belongs to the class and types `this.store.m()` the same way
+    /// a written `store: Store` property does. Taking it as a plain parameter
+    /// would attribute the dependency to the constructor and leave the class
+    /// looking as though it names no type at all.
+    fn ctor_params(&mut self, class_key: &str, ctor_key: &str, params: &[ast::ParamOrTsParamProp]) {
+        for p in params {
+            let (owner, role, binding) = match p {
+                ast::ParamOrTsParamProp::TsParamProp(pp) => match &pp.param {
+                    ast::TsParamPropParam::Ident(b) => (class_key, "field", b),
+                    ast::TsParamPropParam::Assign(a) => match &*a.left {
+                        ast::Pat::Ident(b) => (class_key, "field", b),
+                        _ => continue,
+                    },
+                },
+                ast::ParamOrTsParamProp::Param(param) => match &param.pat {
+                    ast::Pat::Ident(b) => (ctor_key, "param", b),
+                    _ => continue,
+                },
+            };
+            let Some(ann) = &binding.type_ann else {
+                continue;
+            };
+            let pname = binding.id.sym.to_string();
+            self.type_refs(owner, role, &pname, &ann.type_ann);
+            if role == "field"
+                && let Some(written) = Self::type_written(&ann.type_ann)
+            {
+                self.hint(owner, pname, written, false);
+            }
+        }
     }
 
     fn class_method(
