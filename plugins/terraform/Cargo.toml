@@ -1,0 +1,26 @@
+[package]
+name = "drsg-plugin-terraform"
+description = "A dr-strange preprocessor plugin for Terraform — resources, modules, and the references between them"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+# The SDK and an HCL parser. The image convention comes from the SDK (`ops`),
+# so a container image named here lands on the same node the Kubernetes and
+# Compose readers mint.
+[dependencies]
+dr-strange-ext = { path = "../../sdk/rust" }
+hcl-rs = "0.19"
+# A resource in one file referencing one in another is the ordinary case, so
+# the answer spans chunks: this plugin owns its partial format.
+serde = { version = "1", features = ["derive"] }
+rmp-serde = "1"
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"
