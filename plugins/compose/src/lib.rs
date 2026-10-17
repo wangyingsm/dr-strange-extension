@@ -39,7 +39,8 @@
 //! plugin does not infer one.
 
 use dr_strange_ext::{
-    Input, Manifest, Output, OutputExt, Simple, Value, edge, host, node, output, simple_plugin,
+    Input, Manifest, Output, OutputExt, Simple, Value, edge, host, node, ops::parse_image, output,
+    simple_plugin,
 };
 use yaml_rust2::{Yaml, YamlLoader};
 
@@ -392,62 +393,36 @@ fn volume_mount(
 
 /// The image reference, and whatever is parseable from it.
 ///
-/// The tag is where a build pipeline usually puts the revision it built, and
-/// that is the only thread from a running thing back to a commit — so a
-/// revision-shaped tag component is recorded as `revision`, a digest as
-/// `digest`, and a floating tag as neither. See arch/10-ops.md §5.
+/// The parsing lives in the SDK (`dr_strange_ext::ops`) because the
+/// Kubernetes reader must reach the same answer: the same reference is one
+/// node under one key, and two plugins disagreeing about its `revision`
+/// would leave whichever wrote last. See arch/10-ops.md §5.
 fn image(ckey: &str, reference: &str, out: &mut Output) {
+    let parsed = parse_image(reference);
     let mut n = node(reference, "Image").prop("reference", reference);
-
-    let (name_part, digest) = match reference.split_once("@") {
-        Some((before, d)) => (before, Some(d.to_string())),
-        None => (reference, None),
-    };
-    // A colon in the final path segment is a tag; one before a `/` is a
-    // registry port, which is not.
-    let tag = name_part
-        .rsplit_once('/')
-        .map_or(name_part, |(_, last)| last)
-        .split_once(':')
-        .map(|(_, t)| t.to_string());
-
-    if let Some(d) = &digest {
+    if let Some(registry) = parsed.registry {
+        n = n.prop("registry", registry);
+    }
+    n = n.prop("repository", parsed.repository);
+    if let Some(d) = parsed.digest {
         n = n.described(
             "digest",
             "pins the bytes exactly, and says nothing about provenance",
-            d.clone(),
+            d,
         );
     }
-    if let Some(t) = &tag {
-        n = n.prop("tag", t.clone());
-        if let Some(rev) = revision_in(t) {
-            n = n.described(
-                "revision",
-                "a git revision this tag appears to name — the join to a history plane",
-                rev,
-            );
-        }
+    if let Some(t) = parsed.tag {
+        n = n.prop("tag", t);
+    }
+    if let Some(rev) = parsed.revision {
+        n = n.described(
+            "revision",
+            "a git revision this tag appears to name — the join to a history plane",
+            rev,
+        );
     }
     out.nodes.push(n.build());
     out.edges.push(edge(ckey, "USES_IMAGE", reference).build());
-}
-
-/// A git revision inside a tag: a bare hex string, or one behind a `sha-` /
-/// `git-` / `rev-` prefix. Seven characters is the shortest abbreviation git
-/// itself prints; below that a match would be coincidence.
-fn revision_in(tag: &str) -> Option<String> {
-    let candidate = tag
-        .strip_prefix("sha-")
-        .or_else(|| tag.strip_prefix("sha256-"))
-        .or_else(|| tag.strip_prefix("git-"))
-        .or_else(|| tag.strip_prefix("rev-"))
-        .unwrap_or(tag);
-    let hex = candidate.len() >= 7
-        && candidate.len() <= 40
-        && candidate.chars().all(|c| c.is_ascii_hexdigit());
-    // All-digit tags are version numbers far more often than revisions.
-    let all_digits = candidate.chars().all(|c| c.is_ascii_digit());
-    (hex && !all_digits).then(|| candidate.to_ascii_lowercase())
 }
 
 #[cfg(test)]
