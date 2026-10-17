@@ -143,9 +143,9 @@ log level, and nothing in the manifest says which.
 ```json
 {
   "name": "k8s",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "claims": "Kubernetes manifests",
-  "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/k8s-v1.0.0/k8s.wasm",
+  "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/k8s-v1.1.0/k8s.wasm",
   "contract": "1.0.0",
   "min_drsg": "2.7.0"
 }
