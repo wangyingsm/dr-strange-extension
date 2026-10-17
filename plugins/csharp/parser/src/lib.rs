@@ -254,6 +254,18 @@ pub struct FileFacts {
     /// The service registrations this file's code makes.
     #[serde(default)]
     pub registrations: Vec<Registration>,
+    /// `(scope, name, type as written)` for every parameter. Separate from
+    /// `hints`, which keeps only types this tree declares: a predefined type
+    /// like `string` declares nothing here, yet an extension method on it is
+    /// still this tree's own and resolvable.
+    #[serde(default)]
+    pub written_types: Vec<(String, String, String)>,
+    /// `(receiver type as written, simple name, key)` for every extension
+    /// method — a method whose first parameter is marked `this`. C# picks it
+    /// by the receiver's static type, so the pair resolves a call site
+    /// without a checker.
+    #[serde(default)]
+    pub extensions: Vec<(String, String, String)>,
     /// The dependencies this file's types take by injection.
     #[serde(default)]
     pub injections: Vec<Injection>,

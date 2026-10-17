@@ -107,6 +107,29 @@ fn value(n: &Node, prop: &str) -> Value {
 
 /// Keys are C#'s own qualified names: namespace, type, member — and the
 /// namespace contains its types, namespaces nest where both were declared.
+/// An extension method is dispatched on the receiver's static type, so
+/// `value.Shout()` resolves without a checker — the one call shape C#
+/// settles by name that was being counted unresolved.
+#[test]
+fn an_extension_method_resolves_on_its_receiver() {
+    let a = run(vec![(
+        "src/Ext.cs",
+        "namespace P;\n\npublic static class Text\n{\n             public static string Clean(string s) => s;\n}\n\n         public static class TextExtensions\n{\n             public static string Shout(this string value) => Text.Clean(value);\n}\n\n         public static class Dispatch\n{\n             public static string ViaExtension(string value) => value.Shout();\n\n             public static string ViaMissing(string value) => value.NoSuch();\n}\n",
+    )]);
+
+    // The static class that declares it is the target, not the receiver.
+    assert!(has_edge(
+        &a,
+        "P.Dispatch.ViaExtension",
+        "CALLS",
+        "P.TextExtensions.Shout"
+    ));
+    // A name that is neither a member nor an extension stays unresolved.
+    assert!(!a.edges.iter().any(|e| e.ty == "CALLS"
+        && e.src == "P.Dispatch.ViaMissing"
+        && e.dst.ends_with(".NoSuch")));
+}
+
 #[test]
 fn keys_are_qualified_names() {
     let a = run(vec![

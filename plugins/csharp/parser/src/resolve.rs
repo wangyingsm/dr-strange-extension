@@ -114,6 +114,10 @@ struct Index {
     /// Every key this run declared — what tells an external reference from
     /// one the tree holds.
     declared: BTreeSet<String>,
+    /// `(receiver type, name)` → the extension method's key. Flat across
+    /// namespaces: an extension is reached through a `using`, and resolving
+    /// on the pair is what the compiler itself does.
+    extensions: BTreeMap<(String, String), String>,
 }
 
 impl Index {
@@ -124,6 +128,7 @@ impl Index {
             namespaces: BTreeSet::new(),
             globals: Vec::new(),
             declared: BTreeSet::new(),
+            extensions: BTreeMap::new(),
         };
         for f in all {
             if f.failed {
@@ -141,6 +146,11 @@ impl Index {
             }
             for n in &f.nodes {
                 ix.declared.insert(n.key.clone());
+            }
+            for (recv, name, key) in &f.extensions {
+                ix.extensions
+                    .entry((recv.clone(), name.clone()))
+                    .or_insert_with(|| key.clone());
             }
             for t in &f.types {
                 ix.add_type(t);
@@ -599,6 +609,11 @@ struct Resolved<'a> {
     /// resolve to IN-TREE types only: an external receiver's members are a
     /// checker's business and stay out (counted unresolved).
     hints: BTreeMap<(String, String), String>,
+    /// `(scope, name)` → the type as *written*, in-tree or not. An extension
+    /// method on an external type is still this tree's own method, so
+    /// `value.Shout()` on a `string` resolves where `value.Trim()` cannot —
+    /// and that needs the written name the `hints` filter discards.
+    written: BTreeMap<(String, String), String>,
     /// A member key → the in-tree type it declares it returns.
     returns: BTreeMap<String, String>,
     /// Injection points by the type and the name they arrive under — which
@@ -617,9 +632,18 @@ struct Resolved<'a> {
 impl<'a> Resolved<'a> {
     fn of(all: &'a [FileFacts], ix: Index) -> Self {
         let mut hints = BTreeMap::new();
+        let mut written = BTreeMap::new();
         let mut returns = BTreeMap::new();
         for f in all {
+            for (scope, name, text) in &f.written_types {
+                written
+                    .entry((scope.clone(), name.clone()))
+                    .or_insert_with(|| text.clone());
+            }
             for h in &f.hints {
+                written
+                    .entry((h.caller.clone(), h.name.clone()))
+                    .or_insert_with(|| h.written.clone());
                 if let (key, true) = ix.type_ref(&h.written, f) {
                     hints
                         .entry((h.caller.clone(), h.name.clone()))
@@ -637,6 +661,7 @@ impl<'a> Resolved<'a> {
         Self {
             ix,
             hints,
+            written,
             returns,
             injections,
             collections,
@@ -659,6 +684,13 @@ impl<'a> Resolved<'a> {
         self.hints
             .get(&(caller.to_string(), name.to_string()))
             .or_else(|| self.hints.get(&(in_type.to_string(), name.to_string())))
+    }
+
+    /// The type written for a name, in-tree or not — see [`Self::written`].
+    fn written_type(&self, caller: &str, in_type: &str, name: &str) -> Option<&String> {
+        self.written
+            .get(&(caller.to_string(), name.to_string()))
+            .or_else(|| self.written.get(&(in_type.to_string(), name.to_string())))
     }
 
     fn injection_at(&self, owner: &str, name: &str) -> Option<&'a Injection> {
@@ -1053,15 +1085,27 @@ impl World {
     /// `log.Write()`: a value receiver, typed where the source states it.
     fn receiver_call(&mut self, f: &FileFacts, c: &Call, at: (&str, &str), r: &Resolved<'_>) {
         let (name, method) = at;
-        let hit = r.type_of(&c.caller, &c.in_type, name).and_then(|declared| {
-            r.ix.find_method(f, declared, method, 0)
-                .map(|owner| (declared.clone(), owner))
-        });
-        let Some((declared, owner)) = hit else {
+        let hit = r
+            .type_of(&c.caller, &c.in_type, name)
+            .and_then(|declared| {
+                r.ix.find_method(f, declared, method, 0)
+                    .map(|owner| (declared.clone(), format!("{owner}.{method}")))
+            })
+            // No member of that name: an extension method on the same type is
+            // the other thing `value.Shout()` can mean, and the compiler picks
+            // it by the receiver's static type. Its key is the whole target —
+            // the method lives on the static class that declares it.
+            .or_else(|| {
+                let w = r.written_type(&c.caller, &c.in_type, name)?;
+                let simple = w.rsplit('.').next().unwrap_or(w);
+                r.ix.extensions
+                    .get(&(simple.to_string(), method.to_string()))
+                    .map(|key| (w.clone(), key.clone()))
+            });
+        let Some((declared, via)) = hit else {
             self.acct.unresolved += 1;
             return;
         };
-        let via = format!("{owner}.{method}");
         self.edges.add(stamped(
             &c.caller,
             &via,

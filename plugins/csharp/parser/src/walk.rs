@@ -664,22 +664,49 @@ impl Walker<'_> {
     }
 
     /// A member's parameters: each one's declared type binds its name.
+    ///
+    /// A first parameter marked `this` makes the method an extension, which
+    /// C# dispatches on the receiver's *static* type — so the pair of that
+    /// type and the name is all a call site needs.
     fn parameter_types(&mut self, node: TsNode, key: &str) {
         let Some(params) = node.child_by_field_name("parameters") else {
             return;
         };
-        for p in named_children(params) {
+        for (i, p) in named_children(params).into_iter().enumerate() {
             let (Some(name), Some(ty)) = (
                 p.child_by_field_name("name").map(|n| self.text(n)),
                 p.child_by_field_name("type"),
             ) else {
                 continue;
             };
+            // The type as written, predefined or not — what extension
+            // dispatch matches on, where `type_name` keeps only declarable
+            // types and so drops `string`.
+            let as_written = self.text(ty).trim().to_string();
+            self.facts
+                .written_types
+                .push((key.to_string(), name.clone(), as_written.clone()));
+            if i == 0
+                && self.has_this_modifier(p)
+                && let Some(simple) = key.rsplit('.').next()
+            {
+                self.facts
+                    .extensions
+                    .push((as_written, simple.to_string(), key.to_string()));
+            }
             if let Some(written) = self.type_name(ty) {
                 self.hint(key, name.clone(), written);
             }
             self.type_refs(key, "param", &name, ty);
         }
+    }
+
+    /// Whether a parameter is written `this T value` — the extension marker.
+    fn has_this_modifier(&self, param: TsNode) -> bool {
+        let mut cursor = param.walk();
+        param
+            .children(&mut cursor)
+            .any(|c| c.kind() == "this" || (c.kind() == "modifier" && self.text(c) == "this"))
     }
 
     /// A member's body, block or expression alike — `=> expr` is a body, and
