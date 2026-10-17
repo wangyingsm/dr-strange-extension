@@ -136,6 +136,15 @@
       "sha256": "ad59ddc7a96b4f3ccac2faee0cfec145eb9c2bdecbca28d28b1b909a19fcf987",
       "contract": "1.0.0",
       "min_drsg": "2.7.0"
+    },
+    {
+      "name": "terraform",
+      "version": "1.0.0",
+      "claims": "Terraform configuration",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/terraform-v1.0.0/terraform.wasm",
+      "sha256": "8dd8b23d09df9340f2e7a22352bfff70b1c526702d59a7a01bcf3b03ebcbd09f",
+      "contract": "1.0.0",
+      "min_drsg": "2.7.0"
     }
   ]
 }
