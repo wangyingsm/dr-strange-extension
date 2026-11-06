@@ -590,6 +590,68 @@ fn a_reexported_path_resolves_to_the_real_item() {
     every_edge_has_endpoints(&out);
 }
 
+/// The whole point of a facade is that *other* crates write the short path,
+/// and an `impl` block is where they write it as a type. Resolving an impl's
+/// self type against declarations alone minted a stand-in keyed by the facade:
+/// the crate's own enum filed as foreign, its methods hanging off a node with
+/// no source, and an `impact` on either spelling short of the truth.
+#[test]
+fn an_impl_for_a_reexported_type_lands_on_the_declaration() {
+    let t = Tree::new("impl-reexport");
+    t.write("a/Cargo.toml", "[package]\nname = \"a\"\n")
+        .write(
+            "a/src/lib.rs",
+            "pub mod storage;\npub use storage::graph::OnConflict;",
+        )
+        .write("a/src/storage/mod.rs", "pub mod graph;")
+        .write(
+            "a/src/storage/graph/mod.rs",
+            "pub mod bulk;\npub use bulk::OnConflict;",
+        )
+        .write(
+            "a/src/storage/graph/bulk.rs",
+            "pub enum OnConflict { Skip }",
+        )
+        .write("b/Cargo.toml", "[package]\nname = \"b\"\n")
+        .write(
+            "b/src/lib.rs",
+            "pub struct Arg;\nimpl From<Arg> for a::OnConflict {\n    \
+             fn from(_: Arg) -> Self { a::OnConflict::Skip }\n}\n",
+        )
+        // A second, unrelated declaration of the same name, in a crate that
+        // contains neither of the others — this repository has exactly that
+        // pair, the core enum and the CLI's own clap enum. It is what leaves
+        // the by-name fallback unable to narrow, so the facade path has nowhere
+        // to go but a stand-in unless the re-export is followed.
+        .write("c/Cargo.toml", "[package]\nname = \"c\"\n")
+        .write("c/src/lib.rs", "pub enum OnConflict { Replace }");
+
+    let out = run(&t);
+    let ks = keys(&out);
+    assert!(
+        ks.contains(&"a::storage::graph::bulk::OnConflict"),
+        "{ks:?}"
+    );
+    // Two hops across a crate boundary, and the facade is not a node of its own.
+    assert!(!ks.contains(&"a::OnConflict"), "{ks:?}");
+    // The impl method belongs to the declaration, so one node carries them all.
+    assert!(
+        ks.iter()
+            .any(|k| k.starts_with("<a::storage::graph::bulk::OnConflict as From")),
+        "{ks:?}"
+    );
+    // `From` itself is genuinely foreign and still earns a stand-in — the fix
+    // is about this crate's own types, not about suppressing stand-ins.
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.key == "From" && n.label == "Trait"),
+        "{:?}",
+        out.nodes.iter().map(|n| &n.key).collect::<Vec<_>>()
+    );
+    every_edge_has_endpoints(&out);
+}
+
 /// A re-export's target is written relative to the module that wrote it and
 /// may itself be a facade. `lib.rs` says `pub use compute::{Expr}` while
 /// `compute/mod.rs` says `pub use expr::Expr` — the first only makes sense

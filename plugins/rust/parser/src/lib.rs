@@ -2562,10 +2562,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             let target = resolve(
                 written,
                 &f.module,
-                &imports,
-                &traits,
-                &declared,
-                &scopes,
+                &Lookup::new(&imports, &traits, &declared, &scopes, &aliases),
                 "Trait",
                 &mut external,
             );
@@ -2581,10 +2578,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             let target = resolve(
                 written,
                 &f.module,
-                &imports,
-                &traits,
-                &declared,
-                &scopes,
+                &Lookup::new(&imports, &traits, &declared, &scopes, &aliases),
                 "Trait",
                 &mut external,
             );
@@ -2610,10 +2604,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             let target = resolve(
                 path,
                 &f.module,
-                &imports,
-                &traits,
-                &declared,
-                &scopes,
+                &Lookup::new(&imports, &traits, &declared, &scopes, &aliases),
                 "Macro",
                 &mut external,
             );
@@ -2739,10 +2730,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             let self_key = resolve(
                 &b.self_name,
                 &b.module,
-                &imports,
-                &types,
-                &declared,
-                &scopes,
+                &Lookup::new(&imports, &types, &declared, &scopes, &aliases),
                 "Type",
                 &mut external,
             );
@@ -2751,10 +2739,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                 let trait_key = resolve(
                     base,
                     &b.module,
-                    &imports,
-                    &traits,
-                    &declared,
-                    &scopes,
+                    &Lookup::new(&imports, &traits, &declared, &scopes, &aliases),
                     "Trait",
                     &mut external,
                 );
@@ -2851,10 +2836,7 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
                     let target = resolve(
                         path,
                         &b.module,
-                        &imports,
-                        &traits,
-                        &declared,
-                        &scopes,
+                        &Lookup::new(&imports, &traits, &declared, &scopes, &aliases),
                         "Macro",
                         &mut external,
                     );
@@ -3863,40 +3845,77 @@ fn expand_path(path: &str, imports: &BTreeMap<String, String>, module: &str) -> 
     }
 }
 
+/// What a written name is resolved against: the writing file's imports, the
+/// tree's declarations, re-exports and module scopes, and the by-name index
+/// for the kind being resolved — traits for a trait position, types for a
+/// type one.
+struct Lookup<'a> {
+    imports: &'a BTreeMap<String, String>,
+    by_name: &'a BTreeMap<String, Vec<String>>,
+    declared: &'a BTreeSet<String>,
+    scopes: &'a BTreeMap<String, String>,
+    aliases: &'a BTreeMap<String, String>,
+}
+
+impl<'a> Lookup<'a> {
+    /// Built at the call site rather than once per file: `declared` and
+    /// `scopes` grow as each impl block's methods are keyed, so a borrow held
+    /// across that loop would be a borrow of a table still being filled.
+    fn new(
+        imports: &'a BTreeMap<String, String>,
+        by_name: &'a BTreeMap<String, Vec<String>>,
+        declared: &'a BTreeSet<String>,
+        scopes: &'a BTreeMap<String, String>,
+        aliases: &'a BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            imports,
+            by_name,
+            declared,
+            scopes,
+            aliases,
+        }
+    }
+}
+
 /// The key an `impl` block's type or trait refers to.
 ///
-/// Three answers, in descending order of how much the source actually told us:
-/// what the file imported, then the nearest declaration of that name, then a
-/// node marked `external` — because `impl Display for X` is worth recording
-/// even though `Display` lives in std, and because an edge whose endpoint does
-/// not exist is refused by the write path rather than merely being imprecise.
-#[allow(clippy::too_many_arguments)]
+/// Four answers, in descending order of how much the source actually told us:
+/// what the file imported, what a re-export republishes under that path, then
+/// the nearest declaration of that name, then a node marked `external` —
+/// because `impl Display for X` is worth recording even though `Display` lives
+/// in std, and because an edge whose endpoint does not exist is refused by the
+/// write path rather than merely being imprecise.
 fn resolve(
     name: &str,
     module: &str,
-    imports: &BTreeMap<String, String>,
-    by_name: &BTreeMap<String, Vec<String>>,
-    declared: &BTreeSet<String>,
-    scopes: &BTreeMap<String, String>,
+    look: &Lookup<'_>,
     external_label: &str,
     external: &mut BTreeMap<String, Node>,
 ) -> String {
-    // Written out in full, or imported: either way the source named it.
+    // Written out in full, or imported: either way the source named it. Each
+    // candidate is followed through re-exports, because a crate's facade path
+    // is the spelling every *other* crate writes — `pub use
+    // storage::graph::OnConflict` at the root makes `dr_strange_core::OnConflict`
+    // what callers say, and nothing is declared under it. Resolving only
+    // against declarations left that type a stand-in: its own crate's enum,
+    // filed as foreign, with the declaration's edges split across two nodes
+    // and an `impact` on either one short of the truth.
     let simple = name.rsplit("::").next().unwrap_or(name);
     for candidate in [
         Some(absolute(name, module)),
-        imports.get(simple).map(|w| absolute(w, module)),
+        look.imports.get(simple).map(|w| absolute(w, module)),
     ]
     .into_iter()
     .flatten()
     {
-        if declared.contains(&candidate) {
-            return candidate;
+        if let Some(found) = follow_reexports(&candidate, look.aliases, look.declared) {
+            return found;
         }
     }
 
-    if let Some(cands) = by_name.get(simple)
-        && let Some(one) = pick_in_scope(module, cands, scopes)
+    if let Some(cands) = look.by_name.get(simple)
+        && let Some(one) = pick_in_scope(module, cands, look.scopes)
     {
         return one.clone();
     }
@@ -3905,7 +3924,7 @@ fn resolve(
     // expanded through this file's imports exactly as a call into another crate
     // is. `HashSet` alone would merge every crate's `HashSet` into one node and
     // would not match `std::collections::HashSet` written out at another site.
-    let key = expand_path(name, imports, module);
+    let key = expand_path(name, look.imports, module);
     note_external(external, &key, Some(external_label));
     key
 }
