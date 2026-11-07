@@ -234,6 +234,18 @@ pub struct FileFacts {
     /// `(module, macro path, arguments)` for each item-position invocation —
     /// the places where items exist that this parse cannot see.
     macro_calls: Vec<(String, String, String, u64)>,
+    /// `(enclosing key, path as written, line)` for every qualified path inside
+    /// a macro's arguments, item or expression position.
+    ///
+    /// Nothing expands a macro here, so a call it generates is invisible — the
+    /// blind spot behind an `impact` of zero for a symbol a `grep` finds
+    /// callers of at once. The path the source wrote is still in the tokens,
+    /// and the one it names can be resolved like any other; what cannot be
+    /// said is that the call happens, which is why it becomes `MAY_CALL` and
+    /// not `CALLS`. Whichever macro it belongs to, declared here or not: a
+    /// foreign macro hides a call to this tree's code just as well.
+    #[serde(default)]
+    pub macro_paths: Vec<(String, String, u64)>,
     /// `(name introduced, path named)` for every `pub use` — the re-exports
     /// that make a facade path like `crate::cache` exist without anything
     /// being declared under it.
@@ -762,12 +774,19 @@ fn walk_items(items: &[syn::Item], parent: &str, include_source: bool, f: &mut F
                 // reasoned about and a silent one cannot: the edge says this
                 // module invokes that macro, and carries the arguments, which
                 // is usually the shape of what was generated.
-                None => f.macro_calls.push((
-                    parent.to_string(),
-                    path_of(&m.mac.path),
-                    tidy(&m.mac.tokens.to_string()),
-                    line_of(&m.mac.path),
-                )),
+                None => {
+                    let line = line_of(&m.mac.path);
+                    let mut paths = Vec::new();
+                    paths_in(m.mac.tokens.clone(), &mut paths);
+                    f.macro_paths
+                        .extend(paths.into_iter().map(|p| (parent.to_string(), p, line)));
+                    f.macro_calls.push((
+                        parent.to_string(),
+                        path_of(&m.mac.path),
+                        tidy(&m.mac.tokens.to_string()),
+                        line,
+                    ));
+                }
             },
             syn::Item::Trait(t) => {
                 let key = format!("{parent}::{}", t.ident);
@@ -1000,6 +1019,9 @@ fn collect_calls(caller: &str, block: &syn::Block, f: &mut FileFacts) {
     }
     for (path, args, line) in body.macros {
         f.expr_macros.push((caller.to_string(), path, args, line));
+    }
+    for (path, line) in body.macro_paths {
+        f.macro_paths.push((caller.to_string(), path, line));
     }
 }
 
@@ -1286,6 +1308,9 @@ struct BodyFacts {
     /// `(macro path as written, arguments, line)` for each invocation in
     /// expression position. Marked, not expanded — see [`FileFacts::expr_macros`].
     macros: BTreeSet<(String, String, u64)>,
+    /// `(path as written, line)` for every qualified path in those arguments —
+    /// see [`FileFacts::macro_paths`].
+    macro_paths: BTreeSet<(String, u64)>,
 }
 
 /// One route a call states, read before the body's own key is known: an impl
@@ -1683,6 +1708,21 @@ fn call_names(block: &syn::Block) -> BodyFacts {
                 line_of(&node.mac.path),
             ));
             syn::visit::visit_expr_macro(self, node);
+        }
+        /// The paths a macro was handed, wherever it was invoked.
+        ///
+        /// Hooked here rather than on `visit_expr_macro`: a macro written as a
+        /// statement — `transact!(db, store::purge(id));`, which is how most
+        /// are written — is a `Stmt::Macro` and never reaches the expression
+        /// visitor at all.
+        fn visit_macro(&mut self, node: &'ast syn::Macro) {
+            let line = line_of(&node.path);
+            let mut paths = Vec::new();
+            paths_in(node.tokens.clone(), &mut paths);
+            for path in paths {
+                self.facts.macro_paths.insert((path, line));
+            }
+            syn::visit::visit_macro(self, node);
         }
         fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
             let spawner = spawner_shape(&node.method.to_string());
@@ -2458,6 +2498,10 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
     let mut closure_sig_map: BTreeMap<(String, usize), Vec<String>> = BTreeMap::new();
     let mut pending_closures: Vec<(String, ClosureCallee, usize, Vec<ClosureParam>)> = Vec::new();
 
+    // Paths harvested from macro arguments, held until every real call is
+    // known: a proved `CALLS` is not improved by a `MAY_CALL` beside it.
+    let mut pending_may_calls: Vec<(String, String, u64)> = Vec::new();
+
     // `#[cfg]` alternatives can state one derive twice; one edge is the fact.
     let mut derive_seen: BTreeSet<(String, String)> = BTreeSet::new();
     let mut derives_recorded = 0usize;
@@ -2724,6 +2768,22 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
             }
             impl_edges.push(e);
             macro_invocations += 1;
+        }
+
+        // A path written inside a macro's arguments, resolved exactly as a
+        // call would be. Nothing expands the macro, so whether the call
+        // happens is unknown and the edge says so by its type; where the path
+        // points is not a guess — the source wrote it out.
+        for (owner, path, line) in &f.macro_paths {
+            let module = f.scopes.get(owner).map(String::as_str).unwrap_or(&f.module);
+            let written = expand_path(path, &imports, module);
+            let Some(target) = resolve_relative(&written, module, &aliases, &declared) else {
+                continue;
+            };
+            if target == *owner {
+                continue;
+            }
+            pending_may_calls.push((owner.clone(), target, *line));
         }
 
         for b in &f.impls {
@@ -3563,6 +3623,50 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
         out.edges.push(e);
     }
 
+    // Paths harvested from macro arguments, now that every call is known. A
+    // pair already joined by a real `CALLS` gets nothing: the stronger edge is
+    // there, and a weaker one beside it would be counted twice by anyone
+    // adding the two listings up.
+    let called: BTreeSet<(&str, &str)> = out
+        .edges
+        .iter()
+        .filter(|e| e.ty == "CALLS")
+        .map(|e| (e.src.as_str(), e.dst.as_str()))
+        .collect();
+    // Only something a call could land on. A macro's arguments name constants
+    // and types as readily as functions — `assert_eq!(n, DEFAULT_LIMIT)` names
+    // a const — and an edge saying a site *may call* a constant is false about
+    // the one thing its name asserts.
+    let callable: BTreeSet<&str> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "Function" || n.label == "Method")
+        .map(|n| n.key.as_str())
+        .collect();
+    let mut may_call_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut may_calls: Vec<Edge> = Vec::new();
+    for (owner, target, line) in &pending_may_calls {
+        if !callable.contains(target.as_str())
+            || called.contains(&(owner.as_str(), target.as_str()))
+            || !may_call_seen.insert((owner.clone(), target.clone()))
+        {
+            continue;
+        }
+        let mut e = edge_at(owner, target, "MAY_CALL", *line);
+        e.props.insert(
+            "_basis".into(),
+            json!({
+                "$desc": "a path written inside a macro's arguments: where it points is \
+                          what the source wrote, while whether the call happens needs an \
+                          expansion this parse does not do",
+                "$value": "macro-argument",
+            }),
+        );
+        may_calls.push(e);
+    }
+    let may_calls_recorded = may_calls.len();
+    out.edges.extend(may_calls);
+
     out.nodes.extend(unresolved_nodes.into_values());
 
     // Last, because resolving calls is itself a source of external nodes: a
@@ -3701,6 +3805,14 @@ pub fn assemble(parsed: Vec<FileFacts>) -> Assembled {
              declaration's fields, parameters, returns and variants are typed by; \
              {foreign_type_refs} more name types this tree does not declare and are \
              left as written text on the node"
+        ));
+    }
+    if may_calls_recorded > 0 {
+        out.notes.push(format!(
+            "{may_calls_recorded} path(s) written inside macro arguments recorded as \
+             `MAY_CALL` — the macro is not expanded, so whether the call happens is \
+             unknown; where it would go is what the source wrote. Not counted in a \
+             radius, reported beside it"
         ));
     }
     if macro_invocations > 0 {
@@ -6020,6 +6132,57 @@ fn base_path(path: &syn::Path) -> String {
         .map(|s| s.ident.to_string())
         .collect::<Vec<_>>()
         .join("::")
+}
+
+/// Every qualified path written inside a macro's arguments, as the source
+/// spelled it, groups walked through.
+///
+/// A bare identifier is deliberately not one. Most tokens in
+/// `transaction!(db, move |t| t.purge(id))` are locals, and a name on its own
+/// is the guess this does not make — it is the guess that put a Rust `.group()`
+/// call on a CSS class. `A::b` is different in kind: the source wrote a route,
+/// and the only reason it is not a recorded call is that nothing here expands
+/// the macro.
+///
+/// Read from the token stream rather than from the arguments string, where
+/// `tidy` has already closed the spaces around `::` unevenly.
+fn paths_in(tokens: proc_macro2::TokenStream, out: &mut Vec<String>) {
+    use proc_macro2::TokenTree;
+
+    let mut run: Vec<String> = Vec::new();
+    // `:` puncts since the last identifier: two is a path separator, one is a
+    // type annotation or a label and ends the path.
+    let mut colons = 0usize;
+    for tt in tokens {
+        match tt {
+            TokenTree::Ident(i) => {
+                if !run.is_empty() && colons != 2 {
+                    flush_path(&mut run, out);
+                }
+                run.push(i.to_string());
+                colons = 0;
+            }
+            TokenTree::Punct(p) if p.as_char() == ':' => colons += 1,
+            TokenTree::Group(g) => {
+                flush_path(&mut run, out);
+                colons = 0;
+                paths_in(g.stream(), out);
+            }
+            _ => {
+                flush_path(&mut run, out);
+                colons = 0;
+            }
+        }
+    }
+    flush_path(&mut run, out);
+}
+
+/// Keep the run as a path if it is one — two segments or more — and start over.
+fn flush_path(run: &mut Vec<String>, out: &mut Vec<String>) {
+    if run.len() > 1 {
+        out.push(run.join("::"));
+    }
+    run.clear();
 }
 
 /// `to_token_stream` spaces every token; tighten the punctuation a reader (and

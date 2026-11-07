@@ -590,6 +590,70 @@ fn a_reexported_path_resolves_to_the_real_item() {
     every_edge_has_endpoints(&out);
 }
 
+/// Nothing here expands a macro, so a call it generates is invisible — and an
+/// `impact` on the callee reads zero for a symbol a `grep` finds callers of at
+/// once. The path is still written in the tokens: recorded as `MAY_CALL`,
+/// because where it points is what the source wrote while whether the call
+/// happens needs the expansion. A bare identifier earns nothing; a path the
+/// tree does not declare earns nothing; and a pair already joined by a real
+/// `CALLS` is not given a weaker edge beside it.
+#[test]
+fn a_path_inside_macro_arguments_is_recorded_as_a_may_call() {
+    let t = Tree::new("macro-paths");
+    t.write("Cargo.toml", "[package]\nname = \"k\"\n")
+        .write(
+            "src/lib.rs",
+            "pub mod store;\n\
+         pub fn handle(id: u64) {\n    \
+             transact!(db, store::purge(id));\n\
+             let purge = 1;\n    \
+             transact!(db, purge);\n\
+             transact!(db, elsewhere::vanish(id));\n\
+         }\n\
+         pub fn plain(id: u64) {\n    \
+             store::purge(id);\n    \
+             transact!(db, store::purge(id));\n\
+         }\n",
+        )
+        .write("src/store.rs", "pub fn purge(_: u64) {}\n");
+
+    let out = run(&t);
+    let may: Vec<(&str, &str)> = out
+        .edges
+        .iter()
+        .filter(|e| e.ty == "MAY_CALL")
+        .map(|e| (e.src.as_str(), e.dst.as_str()))
+        .collect();
+    assert_eq!(may, vec![("k::handle", "k::store::purge")], "{may:?}");
+
+    // `plain` wrote the call outright as well, so it already has the stronger
+    // edge and gets no second one.
+    assert!(
+        out.edges
+            .iter()
+            .any(|e| e.ty == "CALLS" && e.src == "k::plain" && e.dst == "k::store::purge"),
+        "{:?}",
+        out.edges
+            .iter()
+            .map(|e| (&e.src, &e.ty, &e.dst))
+            .collect::<Vec<_>>()
+    );
+
+    // How it was derived rides on the edge, and nothing was minted for the
+    // path this tree does not declare.
+    let e = out.edges.iter().find(|e| e.ty == "MAY_CALL").unwrap();
+    assert_eq!(
+        e.props.get("_basis").and_then(|v| v["$value"].as_str()),
+        Some("macro-argument")
+    );
+    assert!(
+        !keys(&out).contains(&"elsewhere::vanish"),
+        "{:?}",
+        keys(&out)
+    );
+    every_edge_has_endpoints(&out);
+}
+
 /// The whole point of a facade is that *other* crates write the short path,
 /// and an `impl` block is where they write it as a type. Resolving an impl's
 /// self type against declarations alone minted a stand-in keyed by the facade:
