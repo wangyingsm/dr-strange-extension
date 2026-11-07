@@ -57,11 +57,13 @@ fn edges(o: &Output, ty: &str) -> Vec<(String, String)> {
     found
 }
 
-/// A node property's `$value`.
+/// A node property's value — the `$value` of a described one, or the bare
+/// value of a plain one like `file` or `line`.
 fn prop(o: &Output, key: &str, name: &str) -> Option<Value> {
     let n = o.nodes.iter().find(|n| n.key == key)?;
     let props: Value = n.properties.parse().ok()?;
-    props.get(name)?.get("$value").cloned()
+    let held = props.get(name)?;
+    Some(held.get("$value").unwrap_or(held).clone())
 }
 
 const USERS: &str = "
@@ -816,4 +818,599 @@ fn an_unknown_target_is_reported_once_per_file() {
         .filter(|n| n.contains("not applied"))
         .collect();
     assert_eq!(said.len(), 1, "{said:?}");
+}
+
+// ---- queries written in code ---------------------------------------------
+
+/// Migrations and source files through the real pipeline: replay, scan, emit,
+/// with only `host::list` and `host::read` left out.
+fn digest_code(migrations: &[(&str, &str)], code: &[(&str, &str)]) -> Output {
+    digest_code_with(migrations, code, &[])
+}
+
+fn digest_code_with(
+    migrations: &[(&str, &str)],
+    code: &[(&str, &str)],
+    options: &[(String, String)],
+) -> Output {
+    let dialect = dialect_from(options);
+    let mut chunk = Partial::default();
+    for (path, sql) in migrations {
+        let file = read(path, sql, dialect.as_ref(), &mut chunk);
+        chunk.files.push(file);
+    }
+    let mut out = output();
+    let schema = schema::replay(chunk.files);
+    emit::emit(&schema, &mut out);
+
+    let mut found = Scanned::default();
+    if wants_inline(options) {
+        for (path, text) in code {
+            scan_text(
+                path,
+                text,
+                dialect.as_ref(),
+                broader_grammar(options).as_deref(),
+                &mut found,
+            );
+        }
+    }
+    emit::statements(&schema, &found.stmts, &mut out);
+    out.report.notes.extend(found.notes());
+    out.finish()
+}
+
+/// An edge's property `$value`, for an edge named by both its ends.
+fn edge_prop(o: &Output, src: &str, dst: &str, name: &str) -> Option<Value> {
+    let e = o.edges.iter().find(|e| e.src == src && e.dst == dst)?;
+    let props: Value = e.properties.parse().ok()?;
+    props.get(name)?.get("$value").cloned()
+}
+
+/// Two tables and a join between them, so an unqualified column has more than
+/// one table it could belong to.
+const TWO: &str = "
+CREATE TABLE users (id bigint PRIMARY KEY, email text, name text);
+CREATE TABLE orgs  (id bigint PRIMARY KEY, name text);
+CREATE TABLE sessions (id bigint PRIMARY KEY, user_id bigint);
+";
+
+/// The whole point: a query in Rust lands on the table the DDL declares.
+#[test]
+fn a_query_in_code_reads_the_table_it_names() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "fn load(id: i64) {\n    \
+             let sql = \"SELECT email FROM users WHERE id = $1\";\n}\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/db.rs:2"]);
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/db.rs:2".to_string(), "users".to_string())]
+    );
+    assert_eq!(
+        prop(&out, "src/db.rs:2", "kind"),
+        Some(Value::from("select"))
+    );
+}
+
+/// Where it was written is the only name a query in a literal has, and the
+/// span is what joins it to the function around it.
+#[test]
+fn a_statement_says_where_it_was_written() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "// a header\nfn load() {\n    let sql = \"\n        SELECT email\n        FROM users\";\n}\n",
+        )],
+    );
+    assert_eq!(
+        prop(&out, "src/db.rs:3", "file"),
+        Some(Value::from("src/db.rs"))
+    );
+    assert_eq!(prop(&out, "src/db.rs:3", "line"), Some(Value::from(3i64)));
+    assert_eq!(
+        prop(&out, "src/db.rs:3", "end_line"),
+        Some(Value::from(5i64)),
+        "the literal spans to where it closes"
+    );
+}
+
+/// A projected column is part of the shape the caller gets back; one in a
+/// predicate is not, and the edge says which.
+#[test]
+fn a_column_edge_says_which_role_it_was_named_in() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"SELECT email FROM users WHERE id = $1\";\n",
+        )],
+    );
+    assert_eq!(
+        edge_prop(&out, "src/db.rs:1", "users.email", "role"),
+        Some(Value::from("projection"))
+    );
+    assert_eq!(
+        edge_prop(&out, "src/db.rs:1", "users.id", "role"),
+        Some(Value::from("reference"))
+    );
+}
+
+/// `INSERT … SELECT` does both, and the two tables must not be confused.
+#[test]
+fn an_insert_from_a_select_writes_one_table_and_reads_another() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"INSERT INTO sessions (user_id) SELECT id FROM users\";\n",
+        )],
+    );
+    assert_eq!(
+        edges(&out, "WRITES"),
+        [("src/db.rs:1".to_string(), "sessions".to_string())]
+    );
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/db.rs:1".to_string(), "users".to_string())]
+    );
+    assert_eq!(
+        edge_prop(&out, "src/db.rs:1", "sessions.user_id", "role"),
+        Some(Value::from("assignment")),
+        "the insert's column list belongs to its own target"
+    );
+}
+
+/// An `UPDATE` assigns to its own target whatever else it reads.
+#[test]
+fn an_update_assigns_to_its_target() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"UPDATE users SET email = $1 WHERE id = $2\";\n",
+        )],
+    );
+    assert_eq!(
+        edges(&out, "WRITES"),
+        [("src/db.rs:1".to_string(), "users".to_string())]
+    );
+    assert_eq!(
+        edge_prop(&out, "src/db.rs:1", "users.email", "role"),
+        Some(Value::from("assignment"))
+    );
+}
+
+/// An alias is how real SQL qualifies a column, so it has to resolve.
+#[test]
+fn an_alias_binds_a_column_to_its_table() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"SELECT u.email, o.name FROM users u JOIN orgs o ON o.id = u.id\";\n",
+        )],
+    );
+    let cols = edges(&out, "USES_COLUMN");
+    assert!(
+        cols.contains(&("src/db.rs:1".to_string(), "users.email".to_string())),
+        "{cols:?}"
+    );
+    assert!(
+        cols.contains(&("src/db.rs:1".to_string(), "orgs.name".to_string())),
+        "{cols:?}"
+    );
+}
+
+/// Two tables and no qualifier: `name` is on both, and guessing would be
+/// wrong half the time.
+#[test]
+fn a_bare_column_with_two_relations_is_unbound_not_guessed() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"SELECT name FROM users JOIN orgs ON orgs.id = users.id\";\n",
+        )],
+    );
+    let unbound = prop(&out, "src/db.rs:1", "unbound_columns");
+    assert_eq!(unbound, Some(Value::from("name")), "{unbound:?}");
+    assert!(
+        !edges(&out, "USES_COLUMN")
+            .iter()
+            .any(|(_, dst)| dst.ends_with(".name")),
+        "no edge under a guess"
+    );
+}
+
+/// A table no migration here declares gets no edge at all: a dangling
+/// endpoint fails the entire write, not the one edge.
+#[test]
+fn a_query_against_an_unknown_table_writes_no_edge() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"SELECT id FROM other_service.audit\";\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/db.rs:1"]);
+    assert!(
+        edges(&out, "READS").is_empty(),
+        "{:?}",
+        edges(&out, "READS")
+    );
+    let declared: Vec<String> = out.nodes.iter().map(|n| n.key.clone()).collect();
+    for e in &out.edges {
+        assert!(declared.contains(&e.dst), "dangling endpoint {}", e.dst);
+    }
+}
+
+/// A hole where a value goes reads as the parameter the driver will send.
+#[test]
+fn a_template_hole_is_read_as_a_bind_parameter() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.ts",
+            "const sql = `SELECT email FROM users WHERE id = ${id}`;\n",
+        )],
+    );
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/db.ts:1".to_string(), "users".to_string())]
+    );
+    assert_eq!(
+        prop(&out, "src/db.ts:1", "parameterized"),
+        Some(Value::from(true))
+    );
+}
+
+/// A hole in a table position is a table named at runtime, which is not a
+/// fact about this tree — so the statement is refused and said, not guessed.
+#[test]
+fn a_hole_in_a_table_position_is_refused_and_named() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[("src/db.ts", "const sql = `SELECT id FROM ${table}`;\n")],
+    );
+    assert!(keys(&out, "Statement").is_empty());
+    assert!(
+        out.report
+            .notes
+            .iter()
+            .any(|n| n.contains("would not parse") && n.contains("src/db.ts:1")),
+        "{:?}",
+        out.report.notes
+    );
+}
+
+/// How Java and C# write a statement: several literals and a `+`.
+#[test]
+fn a_query_split_across_literals_is_one_statement() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/Dao.java",
+            "String sql = \"SELECT email \"\n    + \"FROM users \"\n    + \"WHERE id = ?\";\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/Dao.java:1"]);
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/Dao.java:1".to_string(), "users".to_string())]
+    );
+}
+
+/// C concatenates by adjacency alone; Rust does not, and reading `"a" "b"`
+/// there as one string would invent a statement nobody wrote.
+#[test]
+fn adjacency_joins_only_where_the_language_says_so() {
+    let c = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/q.c",
+            "const char *q = \"SELECT email \"\n                \"FROM users\";\n",
+        )],
+    );
+    assert_eq!(
+        edges(&c, "READS"),
+        [("src/q.c:1".to_string(), "users".to_string())]
+    );
+
+    let rs = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[("src/q.rs", "f(\"SELECT email \", \"FROM users\");\n")],
+    );
+    assert!(keys(&rs, "Statement").is_empty(), "two arguments, no query");
+}
+
+/// The reason comments are skipped rather than merely ignored. In a language
+/// where `\'` quotes a string, the apostrophe in one comment opens a literal
+/// that closes at the apostrophe in the next — and everything between, the
+/// query included, is swallowed.
+#[test]
+fn an_apostrophe_in_a_comment_does_not_swallow_the_query_under_it() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.ts",
+            "// don't\nconst sql = \"SELECT email FROM users\";\n// can't\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/db.ts:2"]);
+}
+
+/// A commented-out query is not a query.
+#[test]
+fn a_commented_out_query_is_not_a_statement() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "// let sql = \"SELECT email FROM users\";\n/* \"SELECT name FROM orgs\" */\n",
+        )],
+    );
+    assert!(keys(&out, "Statement").is_empty());
+}
+
+/// A lifetime is not a quote, and treating `'a` as one would desynchronise
+/// every Rust file that has one.
+#[test]
+fn a_rust_lifetime_is_not_a_string() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "fn load<'a>(s: &'a str) {\n    let sql = \"SELECT email FROM users\";\n}\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/db.rs:2"]);
+}
+
+/// A raw string is how a Rust query carries a quoted identifier, and the
+/// quotes have to survive the lexer to reach the parser.
+#[test]
+fn a_raw_string_keeps_the_quotes_inside_it() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = r#\"SELECT \"email\" FROM users\"#;\n",
+        )],
+    );
+    assert!(
+        edges(&out, "USES_COLUMN")
+            .contains(&("src/db.rs:1".to_string(), "users.email".to_string())),
+        "{:?}",
+        edges(&out, "USES_COLUMN")
+    );
+}
+
+/// An escaped quote inside an ordinary literal is the same identifier.
+#[test]
+fn an_escaped_quote_reaches_the_parser_as_a_quote() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/Dao.java",
+            "String sql = \"SELECT \\\"email\\\" FROM users\";\n",
+        )],
+    );
+    assert!(
+        edges(&out, "USES_COLUMN")
+            .contains(&("src/Dao.java:1".to_string(), "users.email".to_string())),
+        "{:?}",
+        edges(&out, "USES_COLUMN")
+    );
+}
+
+/// Python writes a query in a triple-quoted block, Go in backquotes.
+#[test]
+fn every_language_s_own_literal_is_read() {
+    let py = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "app/db.py",
+            "SQL = \"\"\"\nSELECT email\nFROM users\n\"\"\"\n",
+        )],
+    );
+    assert_eq!(
+        edges(&py, "READS"),
+        [("app/db.py:1".to_string(), "users".to_string())]
+    );
+
+    let go = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[("db/q.go", "const q = `SELECT email FROM users`\n")],
+    );
+    assert_eq!(
+        edges(&go, "READS"),
+        [("db/q.go:1".to_string(), "users".to_string())]
+    );
+
+    let cs = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[("Db.cs", "var q = @\"SELECT \"\"email\"\" FROM users\";\n")],
+    );
+    assert!(
+        edges(&cs, "USES_COLUMN").contains(&("Db.cs:1".to_string(), "users.email".to_string())),
+        "a doubled quote in a verbatim string is one quote: {:?}",
+        edges(&cs, "USES_COLUMN")
+    );
+}
+
+/// Every other string in a repository must not become a node.
+#[test]
+fn a_string_that_does_not_open_a_query_is_not_one() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let a = \"hello world\";\nlet b = \"../migrations/0001.sql\";\nlet c = \"users\";\n",
+        )],
+    );
+    assert!(keys(&out, "Statement").is_empty());
+    assert!(
+        out.report
+            .notes
+            .iter()
+            .all(|n| !n.contains("would not parse"))
+    );
+}
+
+/// One line can hold two, and a key is one statement's.
+#[test]
+fn two_statements_on_one_line_get_distinct_keys() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let (a, b) = (\"SELECT email FROM users\", \"SELECT name FROM orgs\");\n",
+        )],
+    );
+    assert_eq!(keys(&out, "Statement"), ["src/db.rs:1", "src/db.rs:1#2"]);
+}
+
+/// A leading `--` is a header, not a reason to refuse the statement under it.
+#[test]
+fn a_leading_sql_comment_does_not_hide_the_statement() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"-- the hot path\\nSELECT email FROM users\";\n",
+        )],
+    );
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/db.rs:1".to_string(), "users".to_string())]
+    );
+}
+
+/// The scan costs a pass over the tree's source, and an operator who does not
+/// want it says so.
+#[test]
+fn the_scan_can_be_turned_off() {
+    let code = [("src/db.rs", "let sql = \"SELECT email FROM users\";\n")];
+    let off = digest_code_with(
+        &[("m/0001.sql", TWO)],
+        &code,
+        &[("inline".into(), "false".into())],
+    );
+    assert!(keys(&off, "Statement").is_empty());
+    assert!(
+        !keys(&off, "Table").is_empty(),
+        "the migrations are still read"
+    );
+}
+
+/// The report accounts for what was read, so a thin result is explained
+/// rather than investigated.
+#[test]
+fn the_report_says_what_the_scan_read() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[
+            ("src/db.rs", "let sql = \"SELECT email FROM users\";\n"),
+            ("src/other.rs", "let x = 1;\n"),
+        ],
+    );
+    assert!(
+        out.report
+            .notes
+            .iter()
+            .any(|n| n.contains("read 2 source file(s)") && n.contains("found 1 in 1")),
+        "{:?}",
+        out.report.notes
+    );
+}
+
+/// A query whose `FROM` is a function reads rows from no table at all, so a
+/// node for it would carry a literal and not one fact.
+#[test]
+fn a_query_about_no_table_is_not_a_node() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let a = \"SELECT n FROM generate_series(1, 10) n\";\n\
+             let b = \"SELECT x FROM unnest($1) x\";\n",
+        )],
+    );
+    assert!(keys(&out, "Statement").is_empty());
+    assert!(
+        out.report
+            .notes
+            .iter()
+            .any(|n| n.contains("2 that name no table")),
+        "{:?}",
+        out.report.notes
+    );
+}
+
+/// A tree with two databases in it writes placeholders both ways: `$1` for
+/// the Postgres primary and `?` for the SQLite cache, in neighbouring
+/// modules. One declared grammar cannot read both, so a refused query is
+/// retried against the broadest one — and says so.
+#[test]
+fn a_query_the_declared_grammar_refuses_is_retried_and_marked() {
+    let pg = [("dialect".to_string(), "postgres".to_string())];
+    let out = digest_code_with(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/cache.rs",
+            "let sql = \"SELECT email FROM users WHERE id = ?\";\n",
+        )],
+        &pg,
+    );
+    assert_eq!(
+        edges(&out, "READS"),
+        [("src/cache.rs:1".to_string(), "users".to_string())]
+    );
+    assert_eq!(
+        prop(&out, "src/cache.rs:1", "_resolved_by"),
+        Some(Value::from("generic-grammar")),
+        "the node says which grammar read it"
+    );
+
+    // And one the declared grammar reads is not marked.
+    let plain = digest_code_with(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "src/db.rs",
+            "let sql = \"SELECT email FROM users WHERE id = $1\";\n",
+        )],
+        &pg,
+    );
+    assert_eq!(prop(&plain, "src/db.rs:1", "_resolved_by"), None);
+}
+
+/// A user interface is full of strings that open with one of SQL's own words.
+/// Handing each to the parser costs nothing in edges and everything in a
+/// report: on one real tree the opening word alone named 178 of them.
+#[test]
+fn a_ui_label_that_opens_with_a_sql_word_is_not_a_candidate() {
+    let out = digest_code(
+        &[("m/0001.sql", TWO)],
+        &[(
+            "app/ui.tsx",
+            "const a = 'Delete';\nconst b = 'Select a workspace';\n\
+             const c = 'Update available';\nconst d = 'Insert the card';\n",
+        )],
+    );
+    assert!(keys(&out, "Statement").is_empty());
+    assert!(
+        out.report
+            .notes
+            .iter()
+            .all(|n| !n.contains("would not parse")),
+        "nothing reached the parser: {:?}",
+        out.report.notes
+    );
 }

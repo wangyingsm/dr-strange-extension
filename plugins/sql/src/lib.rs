@@ -19,19 +19,43 @@
 //! leaves. Ordering is recomputed there from the paths, because the contract
 //! requires the result not to depend on where the chunk boundaries fell.
 //!
-//! ## What it does not do
+//! ## Queries written in code
 //!
-//! It does not read SQL embedded in code, and so writes no edge from a
-//! function to a table. That needs the enclosing function's key, which only
-//! that language's own plugin knows, and an edge onto a key no node declares
-//! fails the entire write rather than the one edge. The honest route is the
-//! one `wire` already takes for HTTP routes — facts on both sides, matched by
-//! a verb at query time — and it is separate work.
+//! A statement in a string literal is read against that schema and becomes a
+//! `Statement` node keyed by where it was written, with `READS`, `WRITES` and
+//! `USES_COLUMN` edges onto the tables and columns the migrations declare —
+//! the vocabulary the `xml` plugin already writes for a MyBatis mapper, so
+//! one query answers "who touches this table" wherever the SQL was written.
+//!
+//! What it does **not** write is the edge from the enclosing function. That
+//! needs the function's key, which only that language's own plugin can mint,
+//! and an edge onto a key no node declares fails the entire write rather than
+//! the one edge. So the direction that works outright is the one this plugin
+//! owns both ends of — `context users` lists every statement that reads or
+//! writes the table, each with the file and line it was written on.
+//!
+//! The other direction is a span: every definition node carries `file`,
+//! `line` and `end_line`, and a `Statement` carries the same, so which
+//! function encloses one is arithmetic over facts already in the graph. It
+//! takes two queries today, because the openCypher subset holds one linear
+//! path per `MATCH` and this join is a cross product of two:
+//!
+//! ```text
+//! MATCH (s:Statement) WHERE s.file = '<path>' RETURN s.line, s.sql
+//! MATCH (f:Function)  WHERE f.file = '<path>' RETURN f.name, f.line, f.end_line
+//! ```
+//!
+//! Source files are pulled through the host, not routed here: the router
+//! hands each file to exactly one handler and a `.rs` belongs to the rust
+//! plugin's, so asking is the only way — which is what the grant is for.
+//! Set `[plugins.sql] inline = false` to read the migrations alone.
 //!
 //! [`Simple`]: dr_strange_ext::Simple
 
 mod change;
 mod emit;
+mod inline;
+mod literal;
 mod lower;
 mod migrate;
 mod schema;
@@ -129,6 +153,13 @@ impl Guest for Sql {
 
         emit::emit(&schema, &mut out);
 
+        if wants_inline(&options) {
+            let broader = broader_grammar(&options);
+            let scanned = scan_code(dialect_from(&options).as_ref(), broader.as_deref());
+            emit::statements(&schema, &scanned.stmts, &mut out);
+            out.report.notes.extend(scanned.notes());
+        }
+
         if applied > 0 {
             out.note(format!(
                 "replayed {applied} migration(s) in order into {} table(s), \
@@ -158,6 +189,134 @@ impl Guest for Sql {
         }
 
         Ok(out.finish())
+    }
+}
+
+/// A source file this plugin will not scan for queries. Past this, a file is
+/// generated or vendored, and lexing it costs more than the statements it
+/// holds are worth.
+const CODE_CAP: usize = 1 << 20;
+
+/// What a pass over the tree's source files found.
+#[derive(Default)]
+struct Scanned {
+    stmts: Vec<inline::Stmt>,
+    /// Files that held at least one statement, and files read in all.
+    with_sql: u32,
+    read: u32,
+    /// Literals that opened like a query and that the grammar refused.
+    refused: Vec<String>,
+    /// Statements about no table, which this plugin has nothing to say about.
+    tableless: u32,
+    oversized: Vec<String>,
+}
+
+impl Scanned {
+    /// What a reader needs to know to explain the statements above — or their
+    /// absence.
+    fn notes(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.read > 0 {
+            let tableless = match self.tableless {
+                0 => String::new(),
+                n => format!(", and {n} that name no table"),
+            };
+            out.push(format!(
+                "read {} source file(s) for queries written in code and found \
+                 {} in {}{tableless}; which function encloses one is a span \
+                 query, not an edge this plugin asserts",
+                self.read,
+                self.stmts.len(),
+                self.with_sql
+            ));
+        }
+        if !self.refused.is_empty() {
+            let shown: Vec<&str> = self.refused.iter().take(5).map(String::as_str).collect();
+            out.push(format!(
+                "{} literal(s) opened like a query and would not parse — \
+                 assembled from branches, or naming a table at runtime: {}{}",
+                self.refused.len(),
+                shown.join("; "),
+                if self.refused.len() > shown.len() {
+                    ", …"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if !self.oversized.is_empty() {
+            out.push(format!(
+                "{} source file(s) past {} KiB were not scanned for queries: {}",
+                self.oversized.len(),
+                CODE_CAP >> 10,
+                self.oversized.join(", ")
+            ));
+        }
+        out
+    }
+}
+
+/// Whether to read the tree's source files as well as its migrations.
+fn wants_inline(options: &[(String, String)]) -> bool {
+    !options
+        .iter()
+        .any(|(k, v)| k == "inline" && matches!(v.trim(), "false" | "no" | "0" | "off"))
+}
+
+/// Every query written in the tree's source files.
+///
+/// Serial, in `assemble`, and deliberately: the host hands this plugin one
+/// `.sql` file per `parse` call, so there is no chunk to spread this over
+/// that would give the same answer whatever the chunking — and resolving a
+/// table name needs the replayed schema, which only `assemble` holds.
+fn scan_code(dialect: &dyn Dialect, broader: Option<&dyn Dialect>) -> Scanned {
+    let mut found = Scanned::default();
+    let Ok(paths) = host::list("") else {
+        return found;
+    };
+    for path in paths {
+        if literal::syntax_of(&path).is_none() {
+            continue;
+        }
+        let Ok(bytes) = host::read(&path) else {
+            continue;
+        };
+        if bytes.len() > CODE_CAP {
+            found.oversized.push(path);
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        scan_text(&path, &text, dialect, broader, &mut found);
+    }
+    found
+}
+
+/// One source file's queries onto `found` — the half of [`scan_code`] that
+/// needs no host, so a test exercises the same path with the text in hand.
+fn scan_text(
+    path: &str,
+    text: &str,
+    dialect: &dyn Dialect,
+    broader: Option<&dyn Dialect>,
+    found: &mut Scanned,
+) {
+    let Some(syntax) = literal::syntax_of(path) else {
+        return;
+    };
+    found.read += 1;
+    let before = found.stmts.len();
+    for lit in literal::literals(text, &syntax) {
+        match inline::read(path, &lit, dialect, broader) {
+            Ok(stmt) => found.stmts.push(stmt),
+            Err(inline::Refused::NotSql) => {}
+            Err(inline::Refused::NoRelation) => found.tableless += 1,
+            Err(inline::Refused::Unparsed(why)) => {
+                found.refused.push(format!("{path}:{}: {why}", lit.line));
+            }
+        }
+    }
+    if found.stmts.len() > before {
+        found.with_sql += 1;
     }
 }
 
@@ -199,16 +358,26 @@ fn read(path: &str, text: &str, dialect: &dyn Dialect, chunk: &mut Partial) -> F
 /// Absent, the generic dialect accepts the broadest grammar, and a file it
 /// cannot read is counted and named with the hint to set this.
 fn dialect_from(options: &[(String, String)]) -> Box<dyn Dialect> {
-    let want = options
-        .iter()
-        .find(|(k, _)| k == "dialect")
-        .map(|(_, v)| v.trim().to_ascii_lowercase());
-    match want.as_deref() {
+    match declared(options).as_deref() {
         Some("postgres" | "postgresql" | "pg") => Box::new(PostgreSqlDialect {}),
         Some("mysql" | "mariadb") => Box::new(MySqlDialect {}),
         Some("sqlite") => Box::new(SQLiteDialect {}),
         _ => Box::new(GenericDialect {}),
     }
+}
+
+/// The dialect the options name, lowercased.
+fn declared(options: &[(String, String)]) -> Option<String> {
+    options
+        .iter()
+        .find(|(k, _)| k == "dialect")
+        .map(|(_, v)| v.trim().to_ascii_lowercase())
+}
+
+/// The grammar a refused *query* is retried against — nothing, when the
+/// declared grammar is already the broadest one there is.
+fn broader_grammar(options: &[(String, String)]) -> Option<Box<dyn Dialect>> {
+    declared(options).map(|_| Box::new(GenericDialect {}) as Box<dyn Dialect>)
 }
 
 export_plugin!(Sql);

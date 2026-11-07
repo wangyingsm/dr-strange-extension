@@ -13,7 +13,13 @@
 use dr_strange_ext::{Output, edge, node};
 
 use crate::change::{Fk, Name, TypeBody};
+use crate::inline::{Role, Stmt};
 use crate::schema::Schema;
+
+/// Most of a statement's text to carry on its node. A query is worth reading
+/// in the graph; a thousand-line generated one is worth knowing about and
+/// reading in the file.
+const SQL_CAP: usize = 600;
 
 /// Turn the replayed schema into nodes and edges on `out`.
 ///
@@ -304,6 +310,114 @@ fn indexes(schema: &Schema, out: &mut Output) {
             }
         }
     }
+}
+
+/// The queries written in code, against the schema the migrations declare.
+///
+/// Keyed by where it was written, because that is the only name a query in a
+/// string literal has. Where two start on one line the second takes a `#2`,
+/// so a key stays one statement's however the line is crowded.
+pub fn statements(schema: &Schema, stmts: &[Stmt], out: &mut Output) {
+    let mut taken: Vec<String> = Vec::new();
+    for stmt in stmts {
+        let at = format!("{}:{}", stmt.file, stmt.line);
+        let mut key = at.clone();
+        let mut nth = 1;
+        while taken.contains(&key) {
+            nth += 1;
+            key = format!("{at}#{nth}");
+        }
+        taken.push(key.clone());
+        statement(schema, stmt, &key, out);
+    }
+}
+
+/// One statement: the node, then an edge for everything the schema can name.
+fn statement(schema: &Schema, stmt: &Stmt, key: &str, out: &mut Output) {
+    let mut unbound: Vec<String> = Vec::new();
+    let mut columns: Vec<(String, &Role)> = Vec::new();
+    for (owner, column, role) in &stmt.columns {
+        match owner
+            .as_ref()
+            .filter(|table| has_column(schema, table, column))
+            .and_then(|table| resolve(schema, table))
+        {
+            Some(table) => columns.push((format!("{table}.{column}"), role)),
+            None if !unbound.contains(column) => unbound.push(column.clone()),
+            None => {}
+        }
+    }
+
+    let mut n = node(key, "Statement")
+        .described(
+            "kind",
+            "select, insert, update or delete, as the statement reads",
+            stmt.kind,
+        )
+        .described(
+            "sql",
+            "the statement as the literal wrote it, whitespace collapsed",
+            &*clip(&stmt.sql),
+        )
+        .prop("file", &*stmt.file)
+        .prop("line", stmt.line as i64)
+        .prop("end_line", stmt.end_line as i64);
+    if stmt.parameterized {
+        n = n.described(
+            "parameterized",
+            "the text interpolates, and each hole was read as a bind parameter",
+            true,
+        );
+    }
+    if stmt.by_generic {
+        n = n.described(
+            "_resolved_by",
+            "the declared dialect refused this statement and generic SQL read \
+             it — a tree with two databases in it writes placeholders both ways",
+            "generic-grammar",
+        );
+    }
+    if !unbound.is_empty() {
+        n = n.described(
+            "unbound_columns",
+            "columns this statement names that no table in the migrations \
+             claims — several relations and no qualifier, or a column the \
+             schema does not declare, so no edge is drawn",
+            unbound.join(", "),
+        );
+    }
+    out.nodes.push(n.build());
+
+    for (ty, tables) in [("READS", &stmt.reads), ("WRITES", &stmt.writes)] {
+        for table in tables.iter() {
+            // A relation this tree never declares gets no edge: an edge onto
+            // a key no node declares fails the entire write, not the one edge.
+            if let Some(target) = resolve(schema, table) {
+                out.edges.push(edge(key, ty, target).build());
+            }
+        }
+    }
+    for (column, role) in columns {
+        out.edges.push(
+            edge(key, "USES_COLUMN", column)
+                .described(
+                    "role",
+                    "where the statement names it: a projection the caller \
+                     gets back, a value it assigns, or a reference elsewhere",
+                    role.as_str(),
+                )
+                .build(),
+        );
+    }
+}
+
+/// The statement's text, or as much of it as a node should carry.
+fn clip(sql: &str) -> String {
+    if sql.chars().count() <= SQL_CAP {
+        return sql.to_string();
+    }
+    let head: String = sql.chars().take(SQL_CAP).collect();
+    format!("{head}…")
 }
 
 /// An `IS_TYPE` edge, when the written type is one the tree declares.
