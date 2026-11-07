@@ -93,6 +93,15 @@
       "min_drsg": "2.0.0"
     },
     {
+      "name": "sql",
+      "version": "1.0.0",
+      "claims": ".sql",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/sql-v1.0.0/sql.wasm",
+      "sha256": "d603d2f2f516b76befd887d3ddaa247a4c46ffda8d04cb709d6a7d9017bfc702",
+      "contract": "1.0.0",
+      "min_drsg": "2.0.0"
+    },
+    {
       "name": "xml",
       "version": "1.0.0",
       "claims": ".xml",
