@@ -1,0 +1,214 @@
+//! The schema a tree declares it keeps.
+//!
+//! Every code plugin can see the name of a table in a string literal and
+//! nothing more. What none of them reads is the DDL that says what that table
+//! *is* — its columns, their types, which of them point at another table. That
+//! lives in a migration directory no parser was claiming.
+//!
+//! ## A sequence, not a set
+//!
+//! Migrations are the reason this plugin implements the contract's two phases
+//! directly instead of taking the [`Simple`] facade. `0001_create_users.sql`
+//! adds a column that `0014_trim.sql` removes; a parser that reads each file
+//! on its own and unions the results reports a schema that never existed, with
+//! every column that was ever added and not one of the drops applied.
+//!
+//! So `parse` does the expensive half per chunk and in parallel — lex, parse,
+//! and reduce each statement to the change it makes — and `assemble` replays
+//! those changes in migration order and emits only the schema the last one
+//! leaves. Ordering is recomputed there from the paths, because the contract
+//! requires the result not to depend on where the chunk boundaries fell.
+//!
+//! ## What it does not do
+//!
+//! It does not read SQL embedded in code, and so writes no edge from a
+//! function to a table. That needs the enclosing function's key, which only
+//! that language's own plugin knows, and an edge onto a key no node declares
+//! fails the entire write rather than the one edge. The honest route is the
+//! one `wire` already takes for HTTP routes — facts on both sides, matched by
+//! a verb at query time — and it is separate work.
+//!
+//! [`Simple`]: dr_strange_ext::Simple
+
+mod change;
+mod emit;
+mod lower;
+mod migrate;
+mod schema;
+
+#[cfg(test)]
+mod tests;
+
+use dr_strange_ext::{Guest, Input, Manifest, Output, OutputExt, export_plugin, host, output};
+use serde::{Deserialize, Serialize};
+use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::parser::Parser;
+
+use change::FileChanges;
+
+/// What one chunk hands to `assemble`.
+///
+/// The host never looks inside a partial, so this is the plugin's own shape
+/// rather than the SDK's serialized `Output`: what crosses is the *changes*
+/// each file makes, because no node can be minted until the whole sequence
+/// has been replayed and only `assemble` has the whole sequence.
+#[derive(Default, Deserialize, Serialize)]
+struct Partial {
+    files: Vec<FileChanges>,
+    skipped: u32,
+    notes: Vec<String>,
+}
+
+/// Shown beside the name in UIs: a stack of plates, the oldest mark there is
+/// for stored data, and no vendor's logo.
+const LOGO: &str = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><ellipse cx='12' cy='5.5' rx='7.5' ry='3' fill='#2f855a'/><path d='M4.5 5.5v5c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-5' fill='#2f855a' opacity='.75'/><path d='M4.5 11.5v5c0 1.66 3.36 3 7.5 3s7.5-1.34 7.5-3v-5' fill='#2f855a' opacity='.55'/></svg>";
+
+struct Sql;
+
+impl Guest for Sql {
+    fn describe() -> Manifest {
+        Manifest {
+            name: "sql".into(),
+            version: "1".into(),
+            extensions: vec!["sql".into()],
+            logo: Some(LOGO.into()),
+        }
+    }
+
+    fn parse(subject: Input, options: Vec<(String, String)>) -> Result<Vec<u8>, String> {
+        let dialect = dialect_from(&options);
+        let mut chunk = Partial::default();
+
+        match subject {
+            Input::Document(doc) => {
+                let text = String::from_utf8_lossy(&doc.bytes);
+                let file = read(&doc.name, &text, dialect.as_ref(), &mut chunk);
+                chunk.files.push(file);
+            }
+            Input::Files(paths) => {
+                for path in paths {
+                    if !migrate::is_up(&path) {
+                        // The reverse migration. Reading it would undo the
+                        // tree that was just read.
+                        continue;
+                    }
+                    match host::read(&path) {
+                        Ok(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            let file = read(&path, &text, dialect.as_ref(), &mut chunk);
+                            chunk.files.push(file);
+                        }
+                        Err(why) => {
+                            chunk.skipped += 1;
+                            chunk.notes.push(format!("{path}: {why}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        serde_json::to_vec(&chunk).map_err(|e| format!("carrying this chunk to assemble: {e}"))
+    }
+
+    fn assemble(partials: Vec<Vec<u8>>, options: Vec<(String, String)>) -> Result<Output, String> {
+        let mut out = output();
+        let mut files: Vec<FileChanges> = Vec::new();
+
+        for bytes in &partials {
+            let chunk: Partial = serde_json::from_slice(bytes)
+                .map_err(|e| format!("reading a chunk's changes: {e}"))?;
+            out.report.skipped += chunk.skipped;
+            out.report.notes.extend(chunk.notes);
+            files.extend(chunk.files);
+        }
+
+        let ignored: u32 = files.iter().map(|f| f.ignored).sum();
+        let read_files = files.len();
+        let schema = schema::replay(files);
+        let applied = schema.applied.len();
+
+        emit::emit(&schema, &mut out);
+
+        if applied > 0 {
+            out.note(format!(
+                "replayed {applied} migration(s) in order into {} table(s), \
+                 {} view(s), {} type(s) and {} index(es); {ignored} statement(s) \
+                 changed no shape",
+                schema.tables.len(),
+                schema.views.len(),
+                schema.types.len(),
+                schema.indexes.len(),
+            ));
+        } else if read_files > 0 {
+            out.note(format!(
+                "{read_files} .sql file(s) held no DDL this plugin models — \
+                 a tree of queries or seed data rather than migrations"
+            ));
+        }
+
+        // The hint belongs with the failures, and only when the dialect was
+        // left to default: told which dialect to use, a parse error is about
+        // the file rather than about this setting.
+        let declared = options.iter().any(|(k, _)| k == "dialect");
+        if !declared && out.report.skipped > 0 {
+            out.note(
+                "parsed as generic SQL; set `[plugins.sql] dialect = \"postgres\" \
+                 | \"mysql\" | \"sqlite\"` if these files are one dialect's",
+            );
+        }
+
+        Ok(out.finish())
+    }
+}
+
+/// One file into the changes it applies.
+fn read(path: &str, text: &str, dialect: &dyn Dialect, chunk: &mut Partial) -> FileChanges {
+    let sql = migrate::up_section(text);
+    let statements = match Parser::parse_sql(dialect, sql) {
+        Ok(statements) => statements,
+        Err(why) => {
+            chunk.skipped += 1;
+            chunk.notes.push(format!("{path}: {why}"));
+            return FileChanges {
+                path: path.to_string(),
+                ..Default::default()
+            };
+        }
+    };
+    let mut changes = Vec::new();
+    let mut ignored = 0u32;
+    for statement in &statements {
+        let made = lower::lower(statement);
+        if made.is_empty() {
+            ignored += 1;
+        }
+        changes.extend(made);
+    }
+    FileChanges {
+        path: path.to_string(),
+        changes,
+        ignored,
+    }
+}
+
+/// The dialect to parse with.
+///
+/// Declared, never sniffed: guessing a dialect from a file's contents is the
+/// kind of guess this family refuses, and the three named here disagree about
+/// enough syntax that a wrong guess is a parse error attributed to the file.
+/// Absent, the generic dialect accepts the broadest grammar, and a file it
+/// cannot read is counted and named with the hint to set this.
+fn dialect_from(options: &[(String, String)]) -> Box<dyn Dialect> {
+    let want = options
+        .iter()
+        .find(|(k, _)| k == "dialect")
+        .map(|(_, v)| v.trim().to_ascii_lowercase());
+    match want.as_deref() {
+        Some("postgres" | "postgresql" | "pg") => Box::new(PostgreSqlDialect {}),
+        Some("mysql" | "mariadb") => Box::new(MySqlDialect {}),
+        Some("sqlite") => Box::new(SQLiteDialect {}),
+        _ => Box::new(GenericDialect {}),
+    }
+}
+
+export_plugin!(Sql);

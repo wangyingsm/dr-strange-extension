@@ -1,0 +1,28 @@
+[package]
+name = "drsg-plugin-sql"
+description = "A dr-strange preprocessor plugin for SQL migrations — the schema a tree declares it keeps"
+version = "1.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dr-strange-ext = { path = "../../sdk/rust" }
+# The partial format between the two phases is this plugin's own — the host
+# never looks inside one — so it carries the changes each file makes rather
+# than a serialized `Output` that could not yet exist.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Pure Rust, so the sandbox needs no wasi-sdk and no C toolchain. Default
+# features off for `recursive-protection`: it guards deep recursion with
+# stack probing the guest has no room for — this plugin bounds nesting
+# itself, in `assemble`, where the limit can be reported.
+sqlparser = { version = "0.63", default-features = false, features = ["std", "visitor"] }
+
+[workspace]
+members = []
+
+[lints.clippy]
+too_many_lines = "warn"

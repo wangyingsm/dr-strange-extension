@@ -122,6 +122,11 @@ k8s-plugin:
 terraform-plugin:
     cd plugins/terraform && cargo build --release --target wasm32-wasip2
 
+# SQL migrations: pure Rust, no grammar and no C — sqlparser needs neither,
+# so this one builds without wasi-sdk.
+sql-plugin:
+    cd plugins/sql && cargo build --release --target wasm32-wasip2
+
 # XML, by the dialect a file declares. Pure Rust like the two above: quick-xml
 # needs no C, so this one builds without wasi-sdk.
 xml-plugin:
@@ -152,6 +157,7 @@ test:
     cd plugins/git/parser && cargo test
     cd plugins/toml && cargo test
     cd plugins/deps && cargo test
+    cd plugins/sql && cargo test
 
 # The P0 eval board: every known resolution gap as an ignored test, red
 # until its phase lands. Failing here is the expected state — this recipe

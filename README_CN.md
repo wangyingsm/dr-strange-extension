@@ -53,6 +53,7 @@
 | `c` | `.c .h` | [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=c-v&expanded=true) |
 | `web` | `.html .htm .css` | tree-sitter html/css/js —— 一个插件同时处理两种语言，`class="btn"` 才能绑定到定义 `.btn` 的样式表 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=web-v&expanded=true) |
 | `toml` | `.toml` | [toml](https://crates.io/crates/toml) —— 最小的、但仍然完整的插件 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=toml-v&expanded=true) |
+| `sql` | `.sql` | [sqlparser](https://crates.io/crates/sqlparser) —— Postgres、MySQL 与 SQLite；迁移会按顺序**重放**，因此得到的模式正是最后一次迁移留下的那个 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=sql-v&expanded=true) |
 | `git` | *无扩展名* —— 以 `.git` 认出的仓库 | 自带的 git 对象库、pack、引用与 reflog 读取实现；不运行 `git` 可执行文件 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=git-v&expanded=true) |
 | `deps` | *无扩展名* —— 以**文件名**认出的构建清单 | [serde_json](https://crates.io/crates/serde_json)、[toml_edit](https://crates.io/crates/toml_edit) 与 [quick-xml](https://crates.io/crates/quick-xml)，另加两种按行解析的格式 | [最新版](https://github.com/wangyingsm/dr-strange-extension/releases?q=deps-v&expanded=true) |
 
