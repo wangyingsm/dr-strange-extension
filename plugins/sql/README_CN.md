@@ -109,13 +109,23 @@ TypeScript 与 Python 的 `+`，以及 C 和 Python 的相邻拼接。
 **不写出指向外层函数的那条边。** 那需要函数的键，而只有那门语言自己的插件才能铸
 出它；并且一条端点没有节点声明的边会让**整次**写入失败。图中持有的是跨度：一个
 `Statement` 与每个定义节点一样携带 `file`、`line` 与 `end_line`，因此哪个函数包住
-了它，是对图中既有事实的算术。今天这需要两条查询，因为 openCypher 子集每个
-`MATCH` 只持有一条线性路径，而这个连接是两者的笛卡尔积：
+了它，是对图中既有事实的算术——而 `context` 就做这项算术，并把结果报成位置，而不
+是报成一条边：
 
-```text
-MATCH (s:Statement) WHERE s.file = '<path>' RETURN s.line, s.sql
-MATCH (f:Function)  WHERE f.file = '<path>' RETURN f.name, f.line, f.end_line
 ```
+$ drsg context crates/ip-storage/src/postgres/identity.rs:114
+kind: select
+sql: SELECT m.standing FROM memberships m JOIN tenants t ON … JOIN users u ON …
+READS → (3):
+  tenants  Table
+  users  Table
+  memberships  Table
+inside (by span) (1):
+  ip_storage::postgres::identity::read_membership  Function  …/identity.rs:108-132
+```
+
+即便 host 旧到不做这个连接，它依然持有连接所读的每一条事实，于是那个答案是由读者
+自己去拼的，而不是不存在。
 
 **一个洞被读作绑定参数。** `${…}`、`#{…}`、`{…}`、`$name` 与 `%s` 绝大多数时候
 都站在取值的位置上，而看见这个洞的语法会拒绝整条语句——偏偏那正是读者最想读到的

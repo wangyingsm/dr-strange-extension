@@ -34,16 +34,20 @@
 //! owns both ends of — `context users` lists every statement that reads or
 //! writes the table, each with the file and line it was written on.
 //!
-//! The other direction is a span: every definition node carries `file`,
-//! `line` and `end_line`, and a `Statement` carries the same, so which
-//! function encloses one is arithmetic over facts already in the graph. It
-//! takes two queries today, because the openCypher subset holds one linear
-//! path per `MATCH` and this join is a cross product of two:
+//! The other direction is a span, and the host joins it: every definition
+//! node carries `file`, `line` and `end_line`, and a `Statement` carries the
+//! same, so which function encloses one is arithmetic over facts already in
+//! the graph. `context` does that arithmetic for any node that records a
+//! span, and reports it as position rather than as an edge:
 //!
 //! ```text
-//! MATCH (s:Statement) WHERE s.file = '<path>' RETURN s.line, s.sql
-//! MATCH (f:Function)  WHERE f.file = '<path>' RETURN f.name, f.line, f.end_line
+//! $ drsg context src/db.rs:114
+//! inside (by span) (1):
+//!   crate::db::read_membership  Function  src/db.rs:108-132
 //! ```
+//!
+//! A host too old to join them still holds every fact the join reads, so
+//! the answer is the reader's to assemble rather than absent.
 //!
 //! Source files are pulled through the host, not routed here: the router
 //! hands each file to exactly one handler and a `.rs` belongs to the rust

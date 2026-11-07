@@ -122,13 +122,23 @@ function's key, which only that language's own plugin can mint, and an edge
 onto a key no node declares fails the *entire* write. What the graph holds
 instead is the span: a `Statement` carries `file`, `line` and `end_line`, as
 every definition node does, so which function encloses one is arithmetic over
-facts already there. It takes two queries today, because the openCypher
-subset holds one linear path per `MATCH` and this join is a cross product:
+facts already there — and `context` does that arithmetic, reporting it as
+position rather than as an edge:
 
-```text
-MATCH (s:Statement) WHERE s.file = '<path>' RETURN s.line, s.sql
-MATCH (f:Function)  WHERE f.file = '<path>' RETURN f.name, f.line, f.end_line
 ```
+$ drsg context crates/ip-storage/src/postgres/identity.rs:114
+kind: select
+sql: SELECT m.standing FROM memberships m JOIN tenants t ON … JOIN users u ON …
+READS → (3):
+  tenants  Table
+  users  Table
+  memberships  Table
+inside (by span) (1):
+  ip_storage::postgres::identity::read_membership  Function  …/identity.rs:108-132
+```
+
+A host too old to join them still holds every fact the join reads, so the
+answer is the reader's to assemble rather than absent.
 
 **A hole is read as a bind parameter.** `${…}`, `#{…}`, `{…}`, `$name` and
 `%s` stand where a value goes far more often than not, and a grammar shown
