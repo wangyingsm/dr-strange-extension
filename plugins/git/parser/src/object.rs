@@ -103,6 +103,8 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Commit {
     pub oid: String,
+    /// The tree this commit records — the root of what the files looked like.
+    pub tree: String,
     pub parents: Vec<String>,
     pub author: Sig,
     pub committer: Sig,
@@ -150,6 +152,7 @@ pub fn parse_commit(oid: &str, data: &[u8]) -> Commit {
     };
     for (key, value) in headers {
         match key {
+            "tree" => commit.tree = value.trim().to_string(),
             "parent" => commit.parents.push(value.trim().to_string()),
             "author" => commit.author = Sig::parse(value),
             "committer" => commit.committer = Sig::parse(value),

@@ -623,3 +623,182 @@ fn an_abandoned_rebase_is_kept_and_marked_incomplete() {
         .expect("the abandoned run is still recorded");
     assert_eq!(value(rebase, "completed"), false);
 }
+
+// ---- the paths a commit changed (ROADMAP §11) ----------------------------
+
+/// `files` as a list of strings, for comparing against a literal.
+fn changed<'a>(h: &'a History, sha: &str) -> Vec<&'a str> {
+    value(node(h, &format!("commit:{sha}")), "files")
+        .as_array()
+        .expect("`files` is a list")
+        .iter()
+        .map(|v| v.as_str().expect("a path is a string"))
+        .collect()
+}
+
+/// A commit records what it changed, and nothing it left alone.
+///
+/// The root commit is the one case with no parent to diff against, so it
+/// reports its whole tree; every commit after it reports only its own change,
+/// which is what makes the list worth storing.
+#[test]
+fn a_commit_records_the_paths_it_changed() {
+    let repo = Repo::new("files-linear");
+    std::fs::create_dir_all(repo.dir.join("src/deep")).unwrap();
+    std::fs::write(repo.dir.join("src/deep/a.rs"), "a").unwrap();
+    std::fs::write(repo.dir.join("README.md"), "r").unwrap();
+    repo.clock.set(1);
+    repo.git(&["add", "."]);
+    repo.git(&["commit", "-q", "-m", "root"]);
+    let root = repo.git(&["rev-parse", "HEAD"]);
+
+    // A nested file, to show the path is repository-relative and the walk
+    // recurses rather than listing a directory.
+    repo.clock.set(2);
+    std::fs::write(repo.dir.join("src/deep/a.rs"), "a2").unwrap();
+    repo.git(&["add", "src/deep/a.rs"]);
+    repo.git(&["commit", "-q", "-m", "edit the nested file"]);
+    let edit = repo.git(&["rev-parse", "HEAD"]);
+
+    let h = repo.read();
+    assert_eq!(
+        changed(&h, &root),
+        vec!["README.md", "src/deep/a.rs"],
+        "a root commit has no parent, so its whole tree is what it added"
+    );
+    assert_eq!(
+        changed(&h, &edit),
+        vec!["src/deep/a.rs"],
+        "only the file that changed — README.md sits in an untouched tree"
+    );
+    assert_eq!(value(node(&h, &format!("commit:{edit}")), "files_count"), 1);
+    // The honesty flag is absent when the list is complete, which is almost
+    // always, so it does not become noise on every commit.
+    assert!(
+        !node(&h, &format!("commit:{edit}"))
+            .props
+            .contains_key("files_partial"),
+        "a complete list says nothing about being partial"
+    );
+}
+
+/// A delete, and a rename.
+///
+/// Git stores no rename — it stores a tree — so a rename is honestly two
+/// paths: the name that left and the name that arrived. Recorded that way
+/// rather than guessed at with a similarity score, which is a choice git's own
+/// porcelain makes at display time and not something the object store knows.
+#[test]
+fn a_delete_and_a_rename_name_every_path_involved() {
+    let repo = Repo::new("files-moves");
+    repo.commit("keep.txt", "k", "root");
+    repo.commit("gone.txt", "g", "add the one to remove");
+    repo.clock.set(3);
+    repo.git(&["rm", "-q", "gone.txt"]);
+    repo.git(&["commit", "-q", "-m", "remove it"]);
+    let removed = repo.git(&["rev-parse", "HEAD"]);
+
+    repo.clock.set(4);
+    repo.git(&["mv", "keep.txt", "moved.txt"]);
+    repo.git(&["commit", "-q", "-m", "move it"]);
+    let moved = repo.git(&["rev-parse", "HEAD"]);
+
+    let h = repo.read();
+    assert_eq!(changed(&h, &removed), vec!["gone.txt"]);
+    assert_eq!(
+        changed(&h, &moved),
+        vec!["keep.txt", "moved.txt"],
+        "a rename is a path that left and a path that arrived"
+    );
+}
+
+/// An ordinary merge lists nothing; the commits it brought in carry the
+/// changes. A merge that resolved something lists what it resolved.
+///
+/// This is git's `TREESAME` rule, and the reason for it is practical: a merge
+/// that re-listed its branch's files would make every file look touched by
+/// every merge, which is the opposite of what the property is for.
+#[test]
+fn a_merge_lists_only_what_differs_from_every_parent() {
+    let repo = Repo::new("files-merge");
+    repo.commit("base.txt", "base\n", "root");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    let on_side = repo.commit("side.txt", "s", "a file only the side adds");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.commit("main.txt", "m", "a file only main adds");
+
+    // No conflict: the two sides touched different files.
+    repo.clock.set(9);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "clean merge", "side"]);
+    let clean = repo.git(&["rev-parse", "HEAD"]);
+
+    let h = repo.read();
+    assert_eq!(
+        changed(&h, &clean),
+        Vec::<&str>::new(),
+        "a clean merge added nothing of its own"
+    );
+    assert_eq!(
+        changed(&h, &on_side),
+        vec!["side.txt"],
+        "the side commit is what actually added the file"
+    );
+
+    // Now one that has to resolve: both sides change the same line, and the
+    // resolution is content that exists in neither parent.
+    let conflict = Repo::new("files-merge-conflict");
+    conflict.commit("f.txt", "original\n", "root");
+    conflict.git(&["checkout", "-q", "-b", "side"]);
+    conflict.commit("f.txt", "side\n", "side's version");
+    conflict.git(&["checkout", "-q", "main"]);
+    conflict.commit("f.txt", "main\n", "main's version");
+    conflict.clock.set(9);
+    let merge = Command::new("git")
+        .arg("-C")
+        .arg(&conflict.dir)
+        .args(["merge", "--no-ff", "-m", "resolve"])
+        .arg("side")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", &conflict.dir)
+        .output()
+        .expect("running git");
+    assert!(
+        !merge.status.success(),
+        "the test's premise: this merge conflicts"
+    );
+    std::fs::write(conflict.dir.join("f.txt"), "resolved\n").unwrap();
+    conflict.git(&["add", "f.txt"]);
+    conflict.git(&["commit", "-q", "--no-edit", "-m", "resolve"]);
+    let resolved = conflict.git(&["rev-parse", "HEAD"]);
+
+    let h = conflict.read();
+    assert_eq!(
+        changed(&h, &resolved),
+        vec!["f.txt"],
+        "the resolution is the merge's own content, in neither parent"
+    );
+}
+
+/// A packed repository answers identically — the diff reads trees through the
+/// same object database, so delta-compressed trees must come back whole.
+#[test]
+fn the_paths_are_the_same_once_the_objects_are_packed() {
+    let repo = Repo::new("files-packed");
+    repo.commit("a.txt", "1", "root");
+    let second = repo.commit("b.txt", "2", "second");
+    let loose = repo.read();
+
+    repo.git(&["gc", "-q", "--aggressive", "--prune=now"]);
+    assert!(
+        !repo
+            .files()
+            .list(".pack")
+            .expect("listing the git directory")
+            .is_empty(),
+        "the test's premise: git packed the objects"
+    );
+
+    let packed = repo.read();
+    assert_eq!(changed(&loose, &second), changed(&packed, &second));
+    assert_eq!(changed(&packed, &second), vec!["b.txt"]);
+}

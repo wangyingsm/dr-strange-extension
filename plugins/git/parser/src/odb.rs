@@ -23,8 +23,9 @@ use std::rc::Rc;
 
 use crate::Files;
 
-/// What an object is. Trees and blobs are read by nothing here, but the type
-/// byte still has to be understood to know that.
+/// What an object is. Blobs are read by nothing here — file *contents* are no
+/// part of a history — but the type byte still has to be understood to know
+/// that, and a tree is read for the paths a commit changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Commit,

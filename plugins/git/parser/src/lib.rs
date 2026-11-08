@@ -11,7 +11,7 @@
 //!
 //! | Node | Key | What it is |
 //! |---|---|---|
-//! | `Commit` (also `Merge`) | `commit:<sha>` | one commit; `Merge` when it has two or more parents |
+//! | `Commit` (also `Merge`) | `commit:<sha>` | one commit; `Merge` when it has two or more parents. `files` lists the paths it changed ([`tree`]) |
 //! | `Branch` (also `Remote`) | `branch:<refname>` | a branch, local or remote-tracking |
 //! | `Tag` | `tag:<refname>` | a tag, annotated or lightweight |
 //! | `Rebase` | `rebase:<ref>@<time>` | one replay, reconstructed from the reflog |
@@ -50,6 +50,7 @@ pub mod object;
 pub mod odb;
 pub mod reflog;
 pub mod refs;
+pub mod tree;
 
 #[cfg(test)]
 mod tests;
@@ -243,7 +244,8 @@ pub fn read_history(files: &dyn Files, opts: &Options) -> Result<History, String
         }
     }
 
-    let walk = walk_commits(files, &mut odb, &tips, opts.max_commits);
+    let mut walk = walk_commits(files, &mut odb, &tips, opts.max_commits);
+    fill_changed(files, &mut odb, &mut walk);
     out.skipped = walk.missing.len();
     out.notes.append(&mut odb.notes);
 
@@ -339,6 +341,39 @@ fn collect_refs(
     (branches, tags)
 }
 
+/// The paths a commit changed, as properties (ROADMAP §11).
+///
+/// Returned rather than written: the caller's `set` closure holds the property
+/// map, and a second writer would have to take it from them.
+fn files_props(changed: &tree::Changed) -> Vec<(&'static str, &'static str, Value)> {
+    let mut out = vec![
+        (
+            "files",
+            "the paths this commit changed, repository-relative; for a merge, \
+             only what differs from every parent, so an ordinary merge lists \
+             nothing and its own commits carry the changes",
+            json!(changed.paths),
+        ),
+        (
+            "files_count",
+            "how many paths it changed — the orderable form",
+            json!(changed.paths.len() as i64),
+        ),
+    ];
+    // Only when true: a property on every commit saying "nothing was wrong"
+    // is noise on a list that is almost always complete.
+    if changed.partial {
+        out.push((
+            "files_partial",
+            "whether `files` had to stop short — a parent outside this graph, \
+             or a tree too large or too deep to walk — so a path missing from \
+             it is not evidence the commit left it alone",
+            json!(true),
+        ));
+    }
+    out
+}
+
 /// One node per commit, and a `PARENT` edge per parent that is in this graph.
 fn emit_commits(
     out: &mut History,
@@ -357,7 +392,8 @@ fn emit_commits(
         if !seen {
             out.summary.unreachable += 1;
         }
-        out.nodes.push(commit_node(commit, opts, seen));
+        out.nodes
+            .push(commit_node(commit, opts, seen, walk.changed.get(oid)));
         for (i, parent) in commit.parents.iter().enumerate() {
             if !walk.selected.contains(parent) {
                 *dropped += 1;
@@ -551,6 +587,9 @@ struct Walk {
     /// Oids something named that the object store does not hold.
     missing: BTreeSet<String>,
     truncated: bool,
+    /// The paths each kept commit changed, by oid — filled by
+    /// [`fill_changed`] once the walk has read the parents it needs.
+    changed: BTreeMap<String, tree::Changed>,
 }
 
 /// Walk from the tips, newest first, to at most `max` commits.
@@ -566,6 +605,7 @@ fn walk_commits(files: &dyn Files, odb: &mut Odb, tips: &[String], max: usize) -
         selected: BTreeSet::new(),
         missing: BTreeSet::new(),
         truncated: false,
+        changed: BTreeMap::new(),
     };
     // `(committer date, oid)` — `BinaryHeap` is a max-heap, so the newest
     // unvisited commit is always next.
@@ -610,6 +650,51 @@ fn walk_commits(files: &dyn Files, odb: &mut Odb, tips: &[String], max: usize) -
         }
     }
     walk
+}
+
+/// Record what each kept commit changed (ROADMAP §11).
+///
+/// A pass of its own, after the walk rather than inside it: the diff needs the
+/// parents' tree oids, and a commit is selected before its parents have been
+/// read. By the time the walk returns, every parent of a kept commit has been
+/// offered — read, or recorded as missing — which is exactly what this needs.
+///
+/// A parent the object store does not hold contributes no diff rather than a
+/// whole-tree one: a shallow clone's boundary commit did not add every file in
+/// the repository, and saying it did would be a worse answer than saying
+/// nothing. Such a commit's list is marked partial for the same reason.
+fn fill_changed(files: &dyn Files, odb: &mut Odb, walk: &mut Walk) {
+    let mut changed: BTreeMap<String, tree::Changed> = BTreeMap::new();
+    // One walker for the whole pass: its tree cache is what keeps this from
+    // re-inflating every parent tree a second time as its child's.
+    let mut walker = tree::Walker::new(odb, files);
+    for oid in &walk.order {
+        let commit = &walk.commits[oid];
+        let mut known: Vec<String> = Vec::new();
+        let mut absent = false;
+        for parent in &commit.parents {
+            match walk.commits.get(parent) {
+                Some(p) => known.push(p.tree.clone()),
+                None => absent = true,
+            }
+        }
+        // A commit with parents, none of which can be read, is a boundary: a
+        // diff against nothing would claim it created the tree.
+        if absent && known.is_empty() && !commit.parents.is_empty() {
+            changed.insert(
+                oid.clone(),
+                tree::Changed {
+                    paths: Vec::new(),
+                    partial: true,
+                },
+            );
+            continue;
+        }
+        let mut one = walker.changed_paths(&commit.tree, &known);
+        one.partial |= absent;
+        changed.insert(oid.clone(), one);
+    }
+    walk.changed = changed;
 }
 
 /// The commits a branch or a tag can still reach. Everything else was read
@@ -665,7 +750,12 @@ fn edge(src: String, ty: &str, dst: String) -> Edge {
     }
 }
 
-fn commit_node(c: &Commit, opts: &Options, reachable: bool) -> Node {
+fn commit_node(
+    c: &Commit,
+    opts: &Options,
+    reachable: bool,
+    changed: Option<&tree::Changed>,
+) -> Node {
     let mut p = Props::new();
     let mut set = |k: &str, desc: &str, v: Value| {
         p.insert(k.to_string(), described(desc, v));
@@ -725,6 +815,11 @@ fn commit_node(c: &Commit, opts: &Options, reachable: bool) -> Node {
         "how many parents it has; two or more is a merge",
         json!(c.parents.len() as i64),
     );
+    if let Some(changed) = changed {
+        for (key, desc, value) in files_props(changed) {
+            set(key, desc, value);
+        }
+    }
     set(
         "is_merge",
         "whether it joins two or more lines of history",
