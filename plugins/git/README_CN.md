@@ -42,7 +42,7 @@ HEAD  refs/heads/main  packed-refs  logs/HEAD  objects/pack/pack-….idx  …
 
 | 节点 | Key | 含义 |
 |---|---|---|
-| `Commit`（另带 `Merge`） | `commit:<sha>` | 一个提交；父节点两个及以上时另带 `Merge` |
+| `Commit`（另带 `Merge`） | `commit:<sha>` | 一个提交；父节点两个及以上时另带 `Merge`。`files` 列出它改动过的路径，`files_count` 是同一事实的可排序整数形式 |
 | `Branch`（另带 `Remote`） | `branch:<refname>` | 分支，本地或远程跟踪 |
 | `Tag` | `tag:<refname>` | 标签，附注或轻量 |
 | `Rebase` | `rebase:<ref>@<时间>` | 一次重放，由 reflog 重建 |
@@ -62,6 +62,16 @@ HEAD  refs/heads/main  packed-refs  logs/HEAD  objects/pack/pack-….idx  …
 提交，`MATCH (m:Merge)` 则只找汇合点。排序用 `committed_ts` /
 `authored_ts`，它们是整数正是为了这个用途；`committed_at` 与 `authored_at`
 是同一时刻的 ISO-8601 形式，按提交者本人的时区呈现。
+
+`files` 正是把历史平面接到旁边代码平面的那条线索——路径是两个平面都会命名的
+唯一事物，而平面是硬命名空间，所以这个连接是对两者的一次**读取**，而不是一条
+边。对合并而言，只有与**每一个**父提交都不同的路径才会被记下，这就是 git 自己
+的 `TREESAME` 规则：因此一次普通的合并什么也不列，因为它带进来的改动早已由它那
+一侧的各个提交各自承担，而真正能通过这条规则的，是冲突解决的内容。改名记为两条
+路径，而不是一次改名——git 存的是树，相似度打分是上层命令的呈现选择，并非对象库
+里的事实。`files_partial` 只在为真时出现，即遍历不得不中途停下之处：父提交不在
+本图内（浅克隆），或某棵树超出了读取数、路径数或深度上限。没有这个标记，一份被
+截短的清单就会在它其实并不知道的时候，回答“这次提交没动过那个文件”。
 
 ## 唯一无法精确的部分
 

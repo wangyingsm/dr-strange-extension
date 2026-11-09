@@ -48,7 +48,7 @@ whenever a file changes, while history only ever grows.
 
 | Node | Key | What it is |
 |---|---|---|
-| `Commit` (also `Merge`) | `commit:<sha>` | one commit; `Merge` when it has two or more parents |
+| `Commit` (also `Merge`) | `commit:<sha>` | one commit; `Merge` when it has two or more parents. `files` lists the paths it changed, `files_count` the same as an orderable integer |
 | `Branch` (also `Remote`) | `branch:<refname>` | a branch, local or remote-tracking |
 | `Tag` | `tag:<refname>` | a tag, annotated or lightweight |
 | `Rebase` | `rebase:<ref>@<time>` | one replay, reconstructed from the reflog |
@@ -69,6 +69,19 @@ A merge is a second label rather than a different first one, so
 joins. Ordering is by `committed_ts` / `authored_ts`, which are integers for
 exactly that reason; `committed_at` and `authored_at` carry the same instants
 as ISO-8601 in the committer's own timezone.
+
+`files` is what joins a history to the code beside it — a path is the one
+thing both planes name, and planes are hard namespaces, so the join is a read
+of both rather than an edge. A path is recorded for a merge only when it
+differs from **every** parent, which is git's own `TREESAME` rule: an ordinary
+merge therefore lists nothing, because its side commits already account for
+what it brought in, and what survives the rule is the conflict resolution.
+Renames are two paths, not a rename — git stores a tree, and similarity
+scoring is a porcelain display choice, not a fact in the object store.
+`files_partial` appears, and only when true, where the walk had to stop short:
+a parent outside the graph (a shallow clone), or a tree past the read, path or
+depth limits. Without it a short list would answer "this commit left that file
+alone" when it does not know.
 
 ## The one thing that cannot be exact
 
