@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "drsg-plugin-git"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "dr-strange-ext",
  "drsg-git-parser",
