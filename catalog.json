@@ -112,10 +112,10 @@
     },
     {
       "name": "git",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "claims": "a repository's history",
-      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/git-v1.0.0/git.wasm",
-      "sha256": "ce50d72fcfa5ad755b36a574c3cb4a37ede2837aa5ef579167b2aefdd0a3cd52",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/git-v1.1.0/git.wasm",
+      "sha256": "6b501b03a74630d7ecdf5083a8e8b84fd6fa49d919ce4055292c5693c1d54ea4",
       "contract": "1.0.0",
       "min_drsg": "2.2.0"
     },
