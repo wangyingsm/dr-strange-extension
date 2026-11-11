@@ -146,6 +146,48 @@ HTTP 路由是本插件唯一无法变成边的引用：处理它或调用它的
 只有**接口**会被分派穿过。抽象类的方法有方法体，已记下的边本就指向会运行的代
 码；由此再去找到覆写是另一个问题，不是本插件回答的问题。
 
+## Dubbo——在另一个仓库里的端口
+
+Spring 的容器用身旁的 bean 应答端口，Dubbo 的则用别处某个进程来应答；这改变了
+能够诚实记下的东西：提供方通常在本次解析根本看不到的仓库里，于是无边可画。
+
+所以两半是被**陈述**出来的，而非在此连接，与 HTTP 路由完全一样。提供方写下它导
+出什么，消费方写下它引用什么，再由 `wire` 跨其所读的每个平面去匹配：
+
+| 属性 | 写在 | 形制 |
+|---|---|---|
+| `serves` | 带 `@DubboService` 的类型 | `DUBBO com.acme.OrderService:trade:1.0.0` |
+| `requests` | 持有 `@DubboReference` 的类型 | 同一形制，记其所求 |
+
+**地址由接口、group 与 version 构成**——从不含方法。这正是 Dubbo 自己对一个服
+务的标识：提供方导出的是整个接口，而 group 与 version 才是区分同一接口两个提供
+方的东西。未写明的 group 或 version 记为空串而非略去，使两半拼法一致，
+`OrderService::` 不致与 `OrderService` 分道。
+
+**这是本插件唯一读取 import 的地方。**别处的注解一律按框架所知的名字匹配，无论
+import 如何书写，因为 import 并不添什么。Dubbo 打破了这一点：`@Service` 究竟是
+Spring 的标记注解还是 Dubbo 的导出，**只**取决于它从哪里来，`@Reference` 亦然。
+故这两个名字由文件自身的 import 裁定——`org.apache.dubbo.config.annotation`，以
+及 2.6 时代代码仍在用的 `com.alibaba.dubbo` 写法。`@DubboService` 与
+`@DubboReference` 自带框架名，无需 import。两者都未 import 的文件按 Spring 读，
+那正是 Spring 代码库里一个未限定的 `@Service` 的本义。
+
+**在本树之内，边照画。**`@DubboReference` 与 `@Autowired` 是同一意义上的注入点
+——该字段从不由用它的代码赋值，到手的是容器造出的代理——故当提供方就在此处时，
+经它发出的调用抵达提供方：
+
+| `_resolved_by` | `_confidence` | 规则 |
+|---|---|---|
+| `dubbo-coordinates` | `high` | 本树中恰有一个提供方按该引用所求的 group 与 version 导出了该接口 |
+
+只有坐标作数。本地的 `@Service` 绝不应答 `@DubboReference`，无论它多么合适：该
+引用收到的是远程代理，身旁的 bean 是另一个对象。若本树中无提供方带有这组坐标，
+则**不出任何边**——那正是寻常的分仓布局，由 `wire` 来回答。
+
+仅以 `version` 相区分的两个提供方，正是 Spring 自身规则无从决断的情形——两者都
+是同一端口的 bean，且无 `@Primary` 为其排序——在此之前它们会因歧义被丢弃。而坐
+标就是其全部差别，并且是写在源码里的。
+
 ## 测试代码
 
 "谁调用了它"这个问题，测试代码与生产代码给出的答案分量不同；分不清两者的读者

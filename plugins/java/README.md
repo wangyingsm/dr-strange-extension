@@ -169,6 +169,59 @@ Only an **interface** is dispatched through. An abstract class's method has a
 body, so the recorded edge already points at code that runs; reaching an
 override from it is a different question, and not one this plugin answers.
 
+## Dubbo — the port that is in another repository
+
+Spring's container answers a port from a bean beside it. Dubbo's answers one
+from a process somewhere else, and that changes what can honestly be recorded:
+the provider is usually in a repository this parse never sees, so there is
+nothing to draw an edge to.
+
+So the two halves are *stated* rather than joined, exactly as an HTTP route
+is. A provider writes what it exports, a consumer what it references, and
+`wire` matches them across every plane it reads:
+
+| Property | Set on | Shape |
+|---|---|---|
+| `serves` | the `@DubboService` type | `DUBBO com.acme.OrderService:trade:1.0.0` |
+| `requests` | the type holding the `@DubboReference` | the same, for what it asks for |
+
+**The address is the interface, the group and the version** — never a method.
+That is Dubbo's own identity for a service: a provider exports the whole
+interface, and group and version are what separate two providers of it. An
+unstated group or version is written as nothing rather than left out, so both
+halves spell it the same way and `OrderService::` cannot drift from
+`OrderService`.
+
+**The one place this plugin reads an import.** Everywhere else an annotation
+is matched by the name the framework knows it by, whatever the import said,
+because the import adds nothing. Dubbo breaks that: `@Service` is Spring's
+stereotype or Dubbo's export depending *only* on where it came from, and
+`@Reference` likewise. So for those two the file's own imports settle it —
+`org.apache.dubbo.config.annotation` and the `com.alibaba.dubbo` spelling that
+2.6-era code still uses. `@DubboService` and `@DubboReference` name themselves
+and need no import. A file importing neither is read as Spring's, which is
+what an unqualified `@Service` in a Spring codebase is.
+
+**In this tree, the edge is drawn.** A `@DubboReference` is an injection point
+in the same sense as `@Autowired` — the field is never assigned by the code
+that uses it, and what arrives is a proxy the container built — so a call
+through it reaches the provider, where the provider is here:
+
+| `_resolved_by` | `_confidence` | The rule |
+|---|---|---|
+| `dubbo-coordinates` | `high` | one provider in this tree exports that interface under the group and version the reference asks for |
+
+Only the coordinates decide. A local `@Service` never answers a
+`@DubboReference`, however well it fits: what that reference receives is a
+remote proxy, and a bean beside it is a different object. Where no provider in
+this tree carries the coordinates, **nothing is emitted** — that is the
+ordinary split-repository layout, and `wire` is what answers it.
+
+Two providers separated only by `version` are the case Spring's own rules
+cannot settle — both are beans of one port, and no `@Primary` ranks them — so
+before this they were dropped as ambiguous. The coordinate is the whole
+difference, and it is written down.
+
 ## Test code
 
 Test code answers "who calls this" differently from production code, and a
