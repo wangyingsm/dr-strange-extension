@@ -22,7 +22,15 @@ about itself — and dispatches on it:
 | Root element | Read as |
 |---|---|
 | `<mapper namespace="…">` | a MyBatis mapper (below) |
+| `<beans>` binding a Dubbo namespace | Dubbo wiring (below) |
 | anything else | **prose**, exactly as an unclaimed file's text is today |
+
+Dubbo is the one dialect whose root element is not its own: its elements live
+inside an ordinary Spring `<beans>` file, under a prefix that file binds. So
+what identifies it is the **namespace declaration** —
+`xmlns:dubbo="http://dubbo.apache.org/schema/dubbo"`, or the
+`code.alibabatech.com` spelling 2.6-era configuration still uses — which also
+says which prefix to look for, rather than assuming `dubbo`.
 
 Claiming an extension must not quietly remove a file from the graph, which is
 why the second row exists: a configuration this plugin has no reader for leaves
@@ -48,7 +56,15 @@ resources/mapper/OrderMapper.xml#now@mysql    one of several written per vendor
 com.acme.OrderMapper.selectById               the Java method it implements
 orders                                        a table, as the SQL names it
 orders.user_id                                a column of it
+
+src/main/resources/provider.xml                             the beans file
+src/main/resources/provider.xml#com.acme.OrderService::1.0  one declaration
+com.acme.OrderService                                       the interface it names
 ```
+
+A Dubbo declaration is keyed by its file and the **address** it declares —
+interface, group and version — so two services exporting one interface under
+different versions are two declarations, which is what they are.
 
 ## Nodes and edges
 
@@ -59,12 +75,17 @@ orders.user_id                                a column of it
 | `Method` + `External` | the method a statement names | — |
 | `Table` + `External` | a table the SQL names | — |
 | `Column` + `External` | a column bound to a table | — |
+| `DubboConfig` | beans file that declares wiring | — |
+| `DubboService` | `<dubbo:service>` | `interface`, `ref`, `serves`, `serves_as_written` |
+| `DubboReference` | `<dubbo:reference>` | `interface`, `id`, `requests`, `requests_as_written` |
+| `Interface` + `External` | the interface a declaration names | — |
 
 | Type | Meaning |
 |---|---|
-| `CONTAINS` | mapper → statement |
+| `CONTAINS` | mapper → statement, beans file → declaration |
 | `IMPLEMENTS` | statement → the Java method, stamped `_resolved_by: mybatis-namespace` |
-| `READS` / `WRITES` | statement → table, split by the keyword that introduced it rather than carried as an edge property, because Cypher cannot read edge properties yet (dr-strange ROADMAP §15) |
+| `EXPORTS` / `CONSUMES` | `<dubbo:service>` / `<dubbo:reference>` → the interface it names, stamped `_resolved_by: dubbo-interface` |
+| `READS` / `WRITES` | statement → table, split by the keyword that introduced it rather than carried as an edge property — which is how it was written when Cypher could not read edge properties, and stays, because the two verbs are what a reader asks by |
 | `USES_COLUMN` | statement → column |
 | `HAS_COLUMN` | table → column |
 
@@ -148,6 +169,45 @@ A **lone** `"…"` is the ambiguous case, and the statement settles it: a quoted
 name standing where only a table can stand proves what that statement's quotes
 mean, and its other quoted names follow. Without that evidence the name rides
 `unbound_columns` rather than becoming a column invented from a string literal.
+
+## Dubbo wiring — stated, not joined
+
+A `<dubbo:service>` and the `<dubbo:reference>` that calls it are normally in
+different repositories, so there is nothing here to draw an edge to. Each half
+states what it declares, in the **same two properties an HTTP route uses**, and
+`wire` matches them across every plane it reads:
+
+```
+<dubbo:service   interface="com.acme.OrderService" ref="orderServiceImpl"
+                 group="trade" version="1.0.0"/>
+   serves    DUBBO com.acme.OrderService:trade:1.0.0
+
+<dubbo:reference id="orderService" interface="com.acme.OrderService"
+                 group="trade" version="1.0.0"/>
+   requests  DUBBO com.acme.OrderService:trade:1.0.0
+```
+
+The java plugin writes the identical string for `@DubboService` and
+`@DubboReference`, so an XML-wired provider matches an annotated consumer and
+the other way round — the mixed layout a codebase mid-migration actually has.
+
+**`ref` is not a key.** `ref="orderServiceImpl"` names a Spring bean, and a
+bean id is a name the container made up: the java plugin keys a type by its
+qualified name, and nothing mints the id. Capitalizing it back into
+`OrderServiceImpl` would be a guess that is wrong whenever a `@Service`
+argument or a `@Bean` method named the bean. So it is recorded as a property
+and carries no edge. The `interface` attribute *is* a qualified name, and gets
+the edge.
+
+**A file's defaults are read.** `<dubbo:provider version="…">` and
+`<dubbo:consumer group="…">` set defaults for everything declared in that
+file, and may be written after what inherits them — so declarations are
+collected first and resolved after, not streamed.
+
+**The rest of the beans file is not modelled.** A Spring `<beans>` holding
+Dubbo wiring usually holds bean definitions too; those are the java plugin's
+business through the annotations on the classes, and this reader counts them
+in a note rather than claiming or dropping them silently.
 
 ## Known limits
 

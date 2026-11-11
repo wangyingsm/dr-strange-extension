@@ -18,7 +18,13 @@ XML 是一种容器格式。这个 `.xml` 是 mapper，下一个是 logback 配�
 | 根元素 | 读作 |
 |---|---|
 | `<mapper namespace="…">` | 一个 MyBatis mapper（见下） |
+| 绑定了 Dubbo 命名空间的 `<beans>` | Dubbo 装配（见下） |
 | 其他 | **散文**，与今天无人声明的文件的文本完全一样 |
+
+Dubbo 是唯一一个根元素不属于自己的方言：它的元素住在寻常的 Spring `<beans>` 文件里，
+挂在该文件所绑定的前缀之下。因此识别它的是**命名空间声明**——
+`xmlns:dubbo="http://dubbo.apache.org/schema/dubbo"`，或 2.6 时代配置仍在用的
+`code.alibabatech.com` 写法——它同时说明该去找哪个前缀，而不是假定就叫 `dubbo`。
 
 声明一个扩展名不该悄悄把文件从图里拿掉，第二行就是为此存在的：本插件没有读取器的配置
 文件，仍以其原本的文本离开，交给读散文的那一方。完全没有打开任何元素的文件被计数并记
@@ -40,7 +46,14 @@ resources/mapper/OrderMapper.xml#now@mysql    按厂商各写一份中的一条
 com.acme.OrderMapper.selectById               它实现的那个 Java 方法
 orders                                        一张表，照 SQL 所写
 orders.user_id                                它的一列
+
+src/main/resources/provider.xml                             该 beans 文件
+src/main/resources/provider.xml#com.acme.OrderService::1.0  其中一处声明
+com.acme.OrderService                                       它指名的接口
 ```
+
+一处 Dubbo 声明以其文件加所声明的**地址**（接口、group、version）为键，于是同一接口
+按不同 version 导出的两个服务就是两处声明——它们本来就是两处。
 
 ## 节点与边
 
@@ -51,12 +64,17 @@ orders.user_id                                它的一列
 | `Method` + `External` | 语句所指名的方法 | — |
 | `Table` + `External` | SQL 指名的表 | — |
 | `Column` + `External` | 绑定到某表的列 | — |
+| `DubboConfig` | 声明了装配的 beans 文件 | — |
+| `DubboService` | `<dubbo:service>` | `interface`、`ref`、`serves`、`serves_as_written` |
+| `DubboReference` | `<dubbo:reference>` | `interface`、`id`、`requests`、`requests_as_written` |
+| `Interface` + `External` | 声明所指名的接口 | — |
 
 | 类型 | 含义 |
 |---|---|
-| `CONTAINS` | mapper → 语句 |
+| `CONTAINS` | mapper → 语句，beans 文件 → 声明 |
 | `IMPLEMENTS` | 语句 → Java 方法，标记 `_resolved_by: mybatis-namespace` |
-| `READS` / `WRITES` | 语句 → 表，按引入该表的关键字分成两种边，而非记在边的属性上——因为 Cypher 目前还读不到边属性（dr-strange ROADMAP §15） |
+| `EXPORTS` / `CONSUMES` | `<dubbo:service>` / `<dubbo:reference>` → 其指名的接口，标记 `_resolved_by: dubbo-interface` |
+| `READS` / `WRITES` | 语句 → 表，按引入该表的关键字分成两种边，而非记在边的属性上——这是在 Cypher 尚读不到边属性时写下的，此后仍旧保留，因为读者本就按这两个动词发问 |
 | `USES_COLUMN` | 语句 → 列 |
 | `HAS_COLUMN` | 表 → 列 |
 
@@ -126,6 +144,38 @@ MyBatis 的语句是由带洞的分支拼起来的，因此一套文法若拒绝
 **孤立的** `"…"` 才是含糊的那一种，由语句自己来定：一个带引号的名字出现在只能站表的位
 置，就证明了这条语句的引号是什么意思，它其余的带引号名字随之而定。没有这项证据时，该名
 字挂在 `unbound_columns` 上，而不是凭一个字符串字面量造出一列。
+
+## Dubbo 装配——只作陈述，不作连接
+
+一处 `<dubbo:service>` 与调用它的 `<dubbo:reference>` 通常在不同的仓库里，所以此处无
+物可连。两半各自陈述其所声明者，写在**与 HTTP 路由完全相同的两个属性**里，再由 `wire`
+跨其所读的每个平面去匹配：
+
+```
+<dubbo:service   interface="com.acme.OrderService" ref="orderServiceImpl"
+                 group="trade" version="1.0.0"/>
+   serves    DUBBO com.acme.OrderService:trade:1.0.0
+
+<dubbo:reference id="orderService" interface="com.acme.OrderService"
+                 group="trade" version="1.0.0"/>
+   requests  DUBBO com.acme.OrderService:trade:1.0.0
+```
+
+java 插件为 `@DubboService` 与 `@DubboReference` 写下的是同一个字符串，于是 XML 装配
+的提供方能与注解装配的消费方相匹配，反之亦然——这正是迁移途中的代码库真实的混合形态。
+
+**`ref` 不是键。**`ref="orderServiceImpl"` 指的是一个 Spring bean，而 bean id 是容器
+自己造的名字：java 插件以限定名为类型作键，没有谁铸造过这个 id。把它首字母大写还原成
+`OrderServiceImpl` 是一个猜测，而只要 `@Service` 的参数或某个 `@Bean` 方法给 bean 起
+过名字，这个猜测就是错的。故它只作属性记下，不带边。`interface` 属性**是**限定名，带边。
+
+**文件的默认值会被读取。**`<dubbo:provider version="…">` 与 `<dubbo:consumer group="…">`
+为该文件中声明的一切设定默认值，且可能写在继承它们的声明之后——所以声明先收齐、后决
+议，而非边读边出。
+
+**beans 文件的其余部分不建模。**装着 Dubbo 装配的 Spring `<beans>` 通常也装着 bean 定
+义；那些是 java 插件经由类上注解去管的事，本读取器在注记里计其数目，而不是据为己有，也
+不是默默丢弃。
 
 ## 已知局限
 
