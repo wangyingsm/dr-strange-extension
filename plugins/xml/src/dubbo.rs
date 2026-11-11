@@ -72,6 +72,15 @@ fn local<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
 /// `<dubbo:provider version="…">` sets a default for every service in the
 /// file and may be written after them.
 pub fn read(path: &str, text: &str, prefix: &str, out: &mut Output) -> Read {
+    let (services, references, mut found) = collect(text, prefix);
+    emit(path, &services, &references, out);
+    found.services = services.len();
+    found.references = references.len();
+    found
+}
+
+/// Everything the file declares, with the file's own defaults applied.
+fn collect(text: &str, prefix: &str) -> (Vec<Declared>, Vec<Declared>, Read) {
     let mut found = Read::default();
     let mut services: Vec<Declared> = Vec::new();
     let mut references: Vec<Declared> = Vec::new();
@@ -140,7 +149,11 @@ pub fn read(path: &str, text: &str, prefix: &str, out: &mut Output) -> Read {
     for d in &mut references {
         inherit(d, &consumer_default);
     }
+    (services, references, found)
+}
 
+/// One node per declaration, and the edge to the interface it names.
+fn emit(path: &str, services: &[Declared], references: &[Declared], out: &mut Output) {
     // The file itself, so what it declares hangs off something: a beans file
     // that declared no wiring is not one of these.
     if !services.is_empty() || !references.is_empty() {
@@ -161,7 +174,7 @@ pub fn read(path: &str, text: &str, prefix: &str, out: &mut Output) -> Read {
             ("CONSUMES", "id"),
         ),
     ] {
-        for d in declared {
+        for d in declared.iter() {
             let key = format!("{path}#{}", d.address());
             // The same two properties, with the same wording, that a route
             // and an annotated provider are written to: one `wire` reads.
@@ -206,7 +219,4 @@ pub fn read(path: &str, text: &str, prefix: &str, out: &mut Output) -> Read {
             );
         }
     }
-    found.services = services.len();
-    found.references = references.len();
-    found
 }
