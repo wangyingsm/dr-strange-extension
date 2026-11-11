@@ -400,3 +400,130 @@ fn result_maps_compose() {
         assert!(has_edge(&out, "m.xml#all", "USES_COLUMN", c), "{c}");
     }
 }
+
+const BEANS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<beans xmlns=\"http://www.springframework.org/schema/beans\"\n       xmlns:dubbo=\"http://dubbo.apache.org/schema/dubbo\">\n";
+
+/// Dubbo's elements live inside a Spring beans file, under a prefix the file
+/// binds — so the namespace declaration is what says this is Dubbo wiring.
+#[test]
+fn dubbo_wiring_is_recognised_by_the_namespace_the_beans_file_binds() {
+    let out = run(
+        "src/main/resources/provider.xml",
+        &format!(
+            "{BEANS}  <dubbo:service interface=\"com.acme.OrderService\" ref=\"orderServiceImpl\"/>\n</beans>\n"
+        ),
+    );
+    assert!(
+        out.nodes
+            .iter()
+            .any(|n| n.key == "src/main/resources/provider.xml" && n.label == "DubboConfig")
+    );
+    assert!(out.prose.is_empty(), "a dialect it reads is never prose");
+}
+
+/// A beans file that binds no Dubbo namespace is an ordinary Spring config
+/// this reader does not claim, and stays prose.
+#[test]
+fn a_beans_file_without_dubbo_is_left_alone() {
+    let out = run(
+        "applicationContext.xml",
+        "<beans xmlns=\"http://www.springframework.org/schema/beans\">\n  <bean id=\"a\" class=\"com.acme.A\"/>\n</beans>\n",
+    );
+    assert!(out.nodes.is_empty());
+    assert!(!out.prose.is_empty());
+}
+
+/// Both halves state the same address, so `wire` can match an XML-declared
+/// provider against an annotated consumer in another repository.
+#[test]
+fn each_half_states_the_address_wire_matches() {
+    let provider = run(
+        "provider.xml",
+        &format!(
+            "{BEANS}  <dubbo:service interface=\"com.acme.OrderService\" ref=\"orderServiceImpl\" group=\"trade\" version=\"1.0.0\"/>\n</beans>\n"
+        ),
+    );
+    let exported = provider
+        .nodes
+        .iter()
+        .find(|n| n.label == "DubboService")
+        .expect("the service");
+    let props: dr_strange_ext::Value = exported.properties.parse().unwrap();
+    assert_eq!(
+        props["serves"]["$value"][0],
+        "DUBBO com.acme.OrderService:trade:1.0.0"
+    );
+
+    let consumer = run(
+        "consumer.xml",
+        &format!(
+            "{BEANS}  <dubbo:reference id=\"orderService\" interface=\"com.acme.OrderService\" group=\"trade\" version=\"1.0.0\"/>\n</beans>\n"
+        ),
+    );
+    let asked = consumer
+        .nodes
+        .iter()
+        .find(|n| n.label == "DubboReference")
+        .expect("the reference");
+    let props: dr_strange_ext::Value = asked.properties.parse().unwrap();
+    assert_eq!(
+        props["requests"]["$value"][0],
+        "DUBBO com.acme.OrderService:trade:1.0.0",
+        "the same string the provider states, or wire matches nothing"
+    );
+}
+
+/// `ref` is a Spring bean id — a name the container made up, not a key any
+/// plugin mints — so it is recorded and carries no edge. The interface is a
+/// key, and does.
+#[test]
+fn a_bean_id_is_recorded_and_never_resolved() {
+    let out = run(
+        "provider.xml",
+        &format!(
+            "{BEANS}  <dubbo:service interface=\"com.acme.OrderService\" ref=\"orderServiceImpl\"/>\n</beans>\n"
+        ),
+    );
+    let exported = out.nodes.iter().find(|n| n.label == "DubboService").unwrap();
+    let props: dr_strange_ext::Value = exported.properties.parse().unwrap();
+    assert_eq!(props["ref"]["$value"], "orderServiceImpl");
+    assert!(
+        out.edges
+            .iter()
+            .any(|e| e.type_ == "EXPORTS" && e.dst == "com.acme.OrderService"),
+        "the interface is a key, so it gets the edge"
+    );
+    assert!(
+        !out.edges.iter().any(|e| e.dst == "orderServiceImpl"),
+        "and the bean id does not"
+    );
+}
+
+/// `<dubbo:provider>` sets the file's default coordinates, and may be written
+/// after the services that inherit them.
+#[test]
+fn a_file_default_is_inherited_however_late_it_is_written() {
+    let out = run(
+        "provider.xml",
+        &format!(
+            "{BEANS}  <dubbo:service interface=\"com.acme.OrderService\" ref=\"a\"/>\n  <dubbo:service interface=\"com.acme.StockService\" ref=\"b\" version=\"2.0.0\"/>\n  <dubbo:provider version=\"1.0.0\"/>\n</beans>\n"
+        ),
+    );
+    let addresses: Vec<String> = out
+        .nodes
+        .iter()
+        .filter(|n| n.label == "DubboService")
+        .map(|n| {
+            let props: dr_strange_ext::Value = n.properties.parse().unwrap();
+            props["serves"]["$value"][0].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(
+        addresses.contains(&"DUBBO com.acme.OrderService::1.0.0".to_string()),
+        "the file's default: {addresses:?}"
+    );
+    assert!(
+        addresses.contains(&"DUBBO com.acme.StockService::2.0.0".to_string()),
+        "and its own, where it states one: {addresses:?}"
+    );
+}

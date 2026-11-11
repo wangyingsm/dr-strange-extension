@@ -12,7 +12,16 @@
 //! name Java methods, and those names are the java plugin's own keys, so the
 //! two halves of a Mapper meet in one graph.
 
+mod dubbo;
 mod mybatis;
+
+/// The namespace URIs a Dubbo beans file binds its prefix to: Apache's, and
+/// Alibaba's from before the donation, which 2.6-era configuration still
+/// names.
+const DUBBO_SCHEMAS: &[&str] = &[
+    "http://dubbo.apache.org/schema/dubbo",
+    "http://code.alibabatech.com/schema/dubbo",
+];
 mod sql;
 
 use dr_strange_ext::{Input, Manifest, Output, OutputExt, Simple, host, output, simple_plugin};
@@ -63,6 +72,10 @@ impl Simple for Xml {
 enum Dialect {
     /// `<mapper namespace="…">`: a MyBatis mapper.
     MybatisMapper,
+    /// A Spring `<beans>` file that declares the Dubbo namespace, carrying
+    /// the prefix it bound it to — `dubbo` by convention, but the file
+    /// decides, so it is read rather than assumed.
+    DubboBeans(String),
     /// A root element this plugin has no reader for.
     Unknown,
     /// Nothing opened at all — not XML, or truncated before the root.
@@ -86,10 +99,26 @@ fn dialect(text: &str) -> Dialect {
                         .flatten()
                         .any(|a| a.key.as_ref() == want.as_bytes())
                 };
+                // Dubbo's elements live under a prefix the file binds, so the
+                // namespace declaration is what says this is Dubbo wiring —
+                // and which prefix to look for.
+                let dubbo_prefix = e.attributes().flatten().find_map(|a| {
+                    let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
+                    let value = String::from_utf8_lossy(&a.value).to_string();
+                    let prefix = key.strip_prefix("xmlns:")?;
+                    DUBBO_SCHEMAS
+                        .iter()
+                        .any(|s| value.starts_with(s))
+                        .then(|| prefix.to_string())
+                });
                 return match name.as_str() {
                     // A mapper without a namespace names no interface, so
                     // there is nothing to join it to.
                     "mapper" if has("namespace") => Dialect::MybatisMapper,
+                    "beans" => match dubbo_prefix {
+                        Some(prefix) => Dialect::DubboBeans(prefix),
+                        None => Dialect::Unknown,
+                    },
                     _ => Dialect::Unknown,
                 };
             }
@@ -139,6 +168,30 @@ fn extract(path: &str, text: &str, out: &mut Output) {
                     "{path}: {} `${{…}}` interpolation(s) left as written — what they \
                      paste may be the table itself, and is not guessed at",
                     read.interpolations
+                ));
+            }
+        }
+        Dialect::DubboBeans(prefix) => {
+            let read = dubbo::read(path, text, &prefix, out);
+            out.note(format!(
+                "{path}: {} Dubbo service(s) and {} reference(s) — stated as `serves` \
+                 and `requests`, matched by `wire`, never joined here: the other half \
+                 is usually in another repository",
+                read.services, read.references
+            ));
+            if read.anonymous > 0 {
+                out.note(format!(
+                    "{path}: {} declaration(s) name no `interface`, which identifies \
+                     no service",
+                    read.anonymous
+                ));
+            }
+            if read.unread > 0 {
+                out.note(format!(
+                    "{path}: {} other element(s) in this beans file are Spring \
+                     configuration this reader does not model — the wiring it does \
+                     read is above",
+                    read.unread
                 ));
             }
         }
