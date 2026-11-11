@@ -1453,3 +1453,156 @@ fn the_declarations_are_counted_in_the_report() {
         a.notes
     );
 }
+
+/// A `@DubboReference` is an injection point like any other: the field is
+/// never assigned by the code that uses it, and what arrives is a proxy the
+/// container built. So the call through it reaches the provider this tree
+/// holds, beside the port the source wrote.
+#[test]
+fn a_dubbo_reference_reaches_the_provider_in_this_tree() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "OrderServiceImpl.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboService;\n\n@DubboService\nclass OrderServiceImpl implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "Checkout.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboReference;\nimport org.spring.Service;\n\n@Service\nclass Checkout {\n    @DubboReference\n    private OrderService orders;\n\n    void submit(String id) {\n        orders.place(id);\n    }\n}\n",
+        ),
+    ]);
+    assert!(
+        has_edge(&a, "m.Checkout.submit", "CALLS", "m.OrderService.place"),
+        "the port the source wrote"
+    );
+    assert!(
+        has_edge(&a, "m.Checkout.submit", "CALLS", "m.OrderServiceImpl.place"),
+        "and the provider the wiring names"
+    );
+    let wired = edge(&a, "CALLS", "m.OrderServiceImpl.place");
+    assert_eq!(text(&wired.props["_resolved_by"]), "dubbo-coordinates");
+    assert_eq!(text(&wired.props["_confidence"]), "high");
+}
+
+/// Two providers of one interface, separated only by `version`. Spring's own
+/// rules cannot tell them apart — both are beans of the same port, and no
+/// `@Primary` ranks them — so this is the edge the plugin used to refuse.
+#[test]
+fn two_providers_of_one_interface_are_told_apart_by_version() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "V1.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboService;\n\n@DubboService(version = \"1.0.0\")\nclass OrderServiceV1 implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "V2.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboService;\n\n@DubboService(version = \"2.0.0\")\nclass OrderServiceV2 implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "Checkout.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboReference;\nimport org.spring.Service;\n\n@Service\nclass Checkout {\n    @DubboReference(version = \"2.0.0\")\n    private OrderService orders;\n\n    void submit(String id) {\n        orders.place(id);\n    }\n}\n",
+        ),
+    ]);
+    assert!(
+        has_edge(&a, "m.Checkout.submit", "CALLS", "m.OrderServiceV2.place"),
+        "the version the reference asks for"
+    );
+    assert!(
+        !has_edge(&a, "m.Checkout.submit", "CALLS", "m.OrderServiceV1.place"),
+        "and not the one it does not: the coordinate is the whole difference"
+    );
+}
+
+/// The two halves either side of a repository boundary: a provider states the
+/// service it exports, a consumer the one it asks for, and `wire` matches
+/// them. The address is interface, group and version — never a method, which
+/// is not part of a Dubbo service's identity.
+#[test]
+fn each_half_states_the_service_for_wire_to_match() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "OrderServiceImpl.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboService;\n\n@DubboService(group = \"trade\", version = \"1.0.0\")\nclass OrderServiceImpl implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "Checkout.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboReference;\nimport org.spring.Service;\n\n@Service\nclass Checkout {\n    @DubboReference(group = \"trade\", version = \"1.0.0\")\n    private OrderService orders;\n\n    void submit(String id) {\n        orders.place(id);\n    }\n}\n",
+        ),
+    ]);
+    assert_eq!(
+        text(&node(&a, "m.OrderServiceImpl").props["serves"]["$value"][0]),
+        "DUBBO m.OrderService:trade:1.0.0"
+    );
+    assert_eq!(
+        text(&node(&a, "m.Checkout").props["requests"]["$value"][0]),
+        "DUBBO m.OrderService:trade:1.0.0",
+        "the same string on both sides, or wire matches nothing"
+    );
+    note_containing(&a, "RPC service(s) provided by a type");
+}
+
+/// Dubbo's `@Service` and Spring's share a name and mean different things;
+/// only the import tells them apart. A file importing neither is read as
+/// Spring's, which is what an unqualified `@Service` in a Spring codebase is.
+#[test]
+fn dubbos_service_annotation_is_not_springs() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "Exported.java",
+            "package m;\n\nimport com.alibaba.dubbo.config.annotation.Service;\n\n@Service(version = \"1.0.0\")\nclass Exported implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+        (
+            "Local.java",
+            "package m;\n\nimport org.spring.Service;\n\n@Service\nclass Local implements OrderService {\n    public void place(String id) {}\n}\n",
+        ),
+    ]);
+    assert_eq!(
+        text(&node(&a, "m.Exported").props["serves"]["$value"][0]),
+        "DUBBO m.OrderService::1.0.0",
+        "the 2.6-era import is Dubbo's, so this one is exported"
+    );
+    assert!(
+        !node(&a, "m.Local").props.contains_key("serves"),
+        "and Spring's stereotype exports nothing"
+    );
+}
+
+/// The ordinary Dubbo layout: the provider is in another repository, so no
+/// edge can be drawn and none is. What the consumer asks for is still
+/// recorded, which is the half `wire` matches against the other repository's.
+#[test]
+fn a_reference_whose_provider_is_elsewhere_records_the_ask_and_no_edge() {
+    let a = run(vec![
+        (
+            "OrderService.java",
+            "package m;\n\npublic interface OrderService {\n    void place(String id);\n}\n",
+        ),
+        (
+            "Checkout.java",
+            "package m;\n\nimport org.apache.dubbo.config.annotation.DubboReference;\nimport org.spring.Service;\n\n@Service\nclass Checkout {\n    @DubboReference(version = \"3.1.0\")\n    private OrderService orders;\n\n    void submit(String id) {\n        orders.place(id);\n    }\n}\n",
+        ),
+    ]);
+    assert!(
+        has_edge(&a, "m.Checkout.submit", "CALLS", "m.OrderService.place"),
+        "the port the source wrote is still a call"
+    );
+    assert_eq!(
+        text(&node(&a, "m.Checkout").props["requests"]["$value"][0]),
+        "DUBBO m.OrderService::3.1.0"
+    );
+}

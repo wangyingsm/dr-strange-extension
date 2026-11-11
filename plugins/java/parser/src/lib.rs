@@ -166,6 +166,13 @@ pub struct Injection {
     /// `@Resource` written on it) outranks `constructor` (a stereotyped bean's
     /// only constructor, which Spring injects unannotated).
     pub kind: String,
+    /// The Dubbo coordinates this reference asks for, where the injection
+    /// point is a `@DubboReference` / `@Reference` rather than a local bean.
+    #[serde(default)]
+    pub rpc: Option<Rpc>,
+    /// Where the dependency is declared, 1-based.
+    #[serde(default)]
+    pub line: u64,
     /// `@Qualifier`'s or `@Resource`'s arguments as written; which bean name
     /// they state is read in [`assemble`], with the rest of Spring's rules.
     pub qualifier: Option<String>,
@@ -198,6 +205,90 @@ pub const STEREOTYPES: &[&str] = &[
     "ControllerAdvice",
     "RestControllerAdvice",
 ];
+
+/// The annotations that export a type as a Dubbo provider, and the ones that
+/// make a dependency a Dubbo reference.
+///
+/// `@DubboService` and `@DubboReference` (3.x) name themselves. `@Service` and
+/// `@Reference` (2.6/2.7) do not: Spring's `@Service` and Dubbo's differ only
+/// in the import, so for those two the file's own imports settle it — see
+/// [`dubbo_annotation`].
+pub const DUBBO_PROVIDERS: &[&str] = &["DubboService", "Service"];
+
+/// The consumer half of [`DUBBO_PROVIDERS`].
+pub const DUBBO_REFERENCES: &[&str] = &["DubboReference", "Reference"];
+
+/// The packages a Dubbo annotation is imported from: Apache's, and Alibaba's
+/// from before the donation, which 2.6-era code still names.
+pub const DUBBO_PACKAGES: &[&str] = &[
+    "org.apache.dubbo.config.annotation",
+    "com.alibaba.dubbo.config.annotation",
+];
+
+/// A Dubbo service's identity beyond the interface: the group and version a
+/// provider exports under, and a reference asks for.
+///
+/// Empty is a coordinate rather than a missing one — Dubbo matches an
+/// unstated group to an unstated group — so both halves carry the same empty
+/// string instead of one carrying `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rpc {
+    pub group: String,
+    pub version: String,
+}
+
+impl Rpc {
+    /// The coordinates an annotation's arguments state.
+    pub fn of(args: Option<&str>) -> Self {
+        let member = |key: &str| args.and_then(|a| anno_member(a, key)).unwrap_or_default();
+        Self {
+            group: member("group"),
+            version: member("version"),
+        }
+    }
+}
+
+/// Is this annotation Dubbo's, rather than the Spring one that shares its
+/// name?
+///
+/// The rest of this plugin matches an annotation by the name Spring knows it
+/// by, whatever the import said, because for Spring the import adds nothing.
+/// Dubbo is the one place that is not true: `@Service` is Spring's stereotype
+/// or Dubbo's export depending only on where it came from. A file importing
+/// neither is read as Spring's, which is what an unqualified `@Service` in a
+/// Spring codebase is.
+pub fn dubbo_annotation(imports: &[Import], family: &[&str], written: &str) -> bool {
+    let name = written.rsplit('.').next().unwrap_or(written);
+    if !family.contains(&name) {
+        return false;
+    }
+    // `@DubboService` / `@DubboReference` carry the framework in the name.
+    if name.starts_with("Dubbo") {
+        return true;
+    }
+    // Written fully qualified, or imported — including the on-demand import,
+    // which binds every name in the package.
+    if DUBBO_PACKAGES.iter().any(|p| written.starts_with(p)) {
+        return true;
+    }
+    imports.iter().any(|i| {
+        DUBBO_PACKAGES
+            .iter()
+            .any(|p| i.target == format!("{p}.{name}") || i.target == format!("{p}.*"))
+    })
+}
+
+/// One `key = "value"` member of an annotation's arguments as written.
+pub fn anno_member(args: &str, key: &str) -> Option<String> {
+    args.split(',').find_map(|part| {
+        let (k, value) = part.split_once('=')?;
+        if k.trim() != key {
+            return None;
+        }
+        let v = value.trim();
+        v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).map(str::to_string)
+    })
+}
 
 /// An annotation as written on a declaration.
 struct Anno {
@@ -617,7 +708,7 @@ impl Walker<'_> {
                             .child_by_field_name("type")
                             .and_then(|t| self.type_name(t));
                         let on = self.annos(member);
-                        let injected = Self::is_injected(&on);
+                        let injected = self.is_injected(&on);
                         for d in member.named_children(&mut member.walk()) {
                             if d.kind() == "variable_declarator"
                                 && let Some(n) = d.child_by_field_name("name")
@@ -808,7 +899,7 @@ impl Walker<'_> {
         // A constructor's or a setter's parameter stands for the field it is
         // assigned to, under the name the two conventionally share.
         let on = self.annos(node);
-        let written_here = Self::is_injected(&on);
+        let written_here = self.is_injected(&on);
         let injects = if node.kind() == "constructor_declaration" {
             written_here || ctx.inject_ctor
         } else {
@@ -829,7 +920,7 @@ impl Walker<'_> {
                     self.type_refs(&key, "param", &pname, t);
                     if injects {
                         let here = self.annos(pnode);
-                        let kind = if written_here || Self::is_injected(&here) {
+                        let kind = if written_here || self.is_injected(&here) {
                             "annotation"
                         } else {
                             "constructor"
@@ -915,6 +1006,13 @@ impl Walker<'_> {
             .iter()
             .find(|a| a.written == "Qualifier" || a.written == "Resource")
             .and_then(|a| a.args.clone());
+        // A Dubbo reference is supplied by the container like any other
+        // injection point; what it adds is the group and version, which are
+        // the only thing telling two providers of one interface apart.
+        let rpc = on
+            .iter()
+            .find(|a| dubbo_annotation(&self.facts.imports, DUBBO_REFERENCES, &a.written))
+            .map(|a| Rpc::of(a.args.as_deref()));
         self.facts.injections.push(Injection {
             owner: owner.to_string(),
             name: name.to_string(),
@@ -922,13 +1020,21 @@ impl Walker<'_> {
             args: self.generic_args(ty),
             kind: kind.to_string(),
             qualifier,
+            rpc,
+            line: self.line(ty),
         });
     }
 
-    /// Is one of these the annotation Spring reads as "inject this"?
-    fn is_injected(on: &[Anno]) -> bool {
-        on.iter()
-            .any(|a| INJECT_ANNOTATIONS.contains(&a.written.as_str()))
+    /// Is one of these the annotation a container reads as "inject this"?
+    ///
+    /// Spring's three, and Dubbo's reference — which is an injection point in
+    /// the same sense: the field is never assigned by the code that uses it,
+    /// and what arrives is a proxy the container built.
+    fn is_injected(&self, on: &[Anno]) -> bool {
+        on.iter().any(|a| {
+            INJECT_ANNOTATIONS.contains(&a.written.as_str())
+                || dubbo_annotation(&self.facts.imports, DUBBO_REFERENCES, &a.written)
+        })
     }
 
     /// A generic type's arguments as written — `List<Handler>` subscripts

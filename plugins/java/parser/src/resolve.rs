@@ -4,7 +4,10 @@
 //! every clause turned into its edge. Once, over every chunk's facts, in
 //! chunk order.
 
-use crate::{CallKind, Edge, FileFacts, Injection, Node, Props, STEREOTYPES, edge_at};
+use crate::{
+    CallKind, DUBBO_PROVIDERS, Edge, FileFacts, Injection, Node, Props, Rpc, STEREOTYPES,
+    anno_member, dubbo_annotation, edge_at,
+};
 use dr_strange_ext::route;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -111,6 +114,10 @@ struct TypeEntry {
 struct Bean {
     name: String,
     primary: bool,
+    /// The coordinates it is exported under, where it is a Dubbo provider.
+    /// `None` for an ordinary bean, which is what keeps a local `@Service`
+    /// from answering a remote reference.
+    dubbo: Option<Rpc>,
 }
 
 /// The containers Spring fills with every bean of the element type.
@@ -149,6 +156,18 @@ fn named_arg(args: &str) -> Option<String> {
         let (key, value) = part.split_once('=')?;
         matches!(key.trim(), "name" | "value")
             .then(|| literal(value))
+            .flatten()
+    })
+}
+
+/// A `key = Some.Type.class` member of an annotation's arguments, as the
+/// class literal names it. `interfaceClass` is how a Dubbo provider states a
+/// service whose interface it does not implement directly.
+fn anno_class(args: &str, key: &str) -> Option<String> {
+    args.split(',').find_map(|part| {
+        let (k, value) = part.split_once('=')?;
+        (k.trim() == key)
+            .then(|| value.trim().strip_suffix(".class").map(str::to_string))
             .flatten()
     })
 }
@@ -403,6 +422,23 @@ impl Dispatch<'_> {
                 via: at.via.to_string(),
             }])
         };
+
+        // A Dubbo reference is answered by a provider, never by a local bean:
+        // what arrives is a remote proxy. So the coordinates decide alone,
+        // and where no provider in this tree carries them the silence is
+        // right — the provider is in another repository, which is what the
+        // `serves` / `requests` halves below are for.
+        if let Some(want) = at.injection.and_then(|i| i.rpc.as_ref()) {
+            let exported: Vec<&(&String, &Bean, String)> = candidates
+                .iter()
+                .filter(|(_, b, _)| b.dubbo.as_ref() == Some(want))
+                .collect();
+            return match exported.as_slice() {
+                [(_, _, dst)] => one(dst.to_string(), "dubbo-coordinates", "high"),
+                [] => Picked::Silent,
+                _ => Picked::Ambiguous,
+            };
+        }
 
         if let Some(name) = at
             .injection
@@ -755,7 +791,12 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 continue;
             }
             let anno = simple(&c.written);
-            if STEREOTYPES.contains(&anno) {
+            // Dubbo's `@Service` is Spring's name with another meaning, and
+            // its `@DubboService` is not a stereotype at all — both register
+            // the type as a bean, and both carry coordinates no stereotype
+            // has.
+            let exported = dubbo_annotation(&f.imports, DUBBO_PROVIDERS, &c.written);
+            if STEREOTYPES.contains(&anno) || exported {
                 if !ix.types.contains_key(&c.src) {
                     continue;
                 }
@@ -764,10 +805,14 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                     .as_deref()
                     .and_then(named_arg)
                     .unwrap_or_else(|| decapitalize(simple(&c.src)));
-                beans.entry(c.src.clone()).or_insert(Bean {
+                let bean = beans.entry(c.src.clone()).or_insert(Bean {
                     name,
                     primary: false,
+                    dubbo: None,
                 });
+                if exported {
+                    bean.dubbo = Some(Rpc::of(c.args.as_deref()));
+                }
             } else if anno == "Bean" {
                 let Some(returned) = returns_ix.get(&c.src) else {
                     continue;
@@ -780,6 +825,7 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
                 beans.entry(returned.clone()).or_insert(Bean {
                     name,
                     primary: false,
+                    dubbo: None,
                 });
             }
         }
@@ -813,6 +859,77 @@ pub fn assemble(all: Vec<FileFacts>) -> Assembled {
             }
         }
     }
+    // ---- the RPC halves ---------------------------------------------------
+    // A Dubbo service is identified by its interface, group and version — the
+    // method is not part of that identity, and the provider is usually in
+    // another repository, so these are stated like a route and matched by
+    // `wire` rather than joined into an edge here.
+    let mut provided: Vec<route::RpcRef> = Vec::new();
+    let mut referenced: Vec<route::RpcRef> = Vec::new();
+    for f in &all {
+        for c in &f.clauses {
+            if c.ty != "ANNOTATED_BY" || !dubbo_annotation(&f.imports, DUBBO_PROVIDERS, &c.written)
+            {
+                continue;
+            }
+            let coords = Rpc::of(c.args.as_deref());
+            // `interfaceClass = OrderService.class` or `interfaceName =
+            // "a.b.OrderService"` names the service outright; a provider that
+            // names neither exports what it implements.
+            let stated: Vec<String> = c
+                .args
+                .as_deref()
+                .map(|a| {
+                    anno_member(a, "interfaceName")
+                        .into_iter()
+                        .chain(anno_class(a, "interfaceClass"))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let implemented = f
+                .types
+                .iter()
+                .find(|t| t.key == c.src)
+                .map(|t| t.implements.clone())
+                .unwrap_or_default();
+            let written = match stated.is_empty() {
+                true => implemented,
+                false => stated,
+            };
+            for name in written {
+                let Ok((iface, _)) = ix.type_ref(&name, f) else {
+                    continue;
+                };
+                provided.push(route::RpcRef {
+                    symbol: c.src.clone(),
+                    written: route::dubbo(&iface, None, &coords.group, &coords.version),
+                    line: c.line,
+                });
+            }
+        }
+        for i in &f.injections {
+            let Some(coords) = &i.rpc else { continue };
+            let Ok((iface, _)) = ix.type_ref(&i.written, f) else {
+                continue;
+            };
+            referenced.push(route::RpcRef {
+                symbol: i.owner.clone(),
+                written: route::dubbo(&iface, None, &coords.group, &coords.version),
+                line: i.line,
+            });
+        }
+    }
+    let provides = route::Routes::of_rpc(route::Side::Serves, &provided);
+    let consumes = route::Routes::of_rpc(route::Side::Requests, &referenced);
+    let mut exported = 0usize;
+    let mut imported = 0usize;
+    for node in &mut out.nodes {
+        exported += provides.write(&node.key, &mut node.props);
+        imported += consumes.write(&node.key, &mut node.props);
+    }
+    out.notes.extend(provides.note(exported));
+    out.notes.extend(consumes.note(imported));
+
     let dispatch = Dispatch {
         ix: &ix,
         beans: &beans,
