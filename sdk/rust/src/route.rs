@@ -19,12 +19,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// An HTTP verb, as the frameworks spell it.
+/// An HTTP verb, as the frameworks spell it — or the protocol a non-HTTP
+/// endpoint speaks.
 ///
 /// `Any` is not a verb a client sends: it is what a declaration means when it
 /// names no verb (Spring's bare `@RequestMapping`, `http.HandleFunc`,
 /// Django's `path()`), and what a request means when a project-local wrapper
 /// hides it. It matches every verb, and a reader is told that it did.
+///
+/// `Dubbo` is not a verb at all: it is the first token of an RPC endpoint, so
+/// that one property holds both kinds and `wire --verb DUBBO` selects the RPC
+/// half while an HTTP filter never does. [`Verb::from_name`] never returns it
+/// — a protocol is stated by the plugin that read the wiring, never inferred
+/// from a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Verb {
     Get,
@@ -35,6 +42,7 @@ pub enum Verb {
     Head,
     Options,
     Any,
+    Dubbo,
 }
 
 impl Verb {
@@ -77,8 +85,26 @@ impl Verb {
             Verb::Head => "HEAD",
             Verb::Options => "OPTIONS",
             Verb::Any => "*",
+            Verb::Dubbo => "DUBBO",
         }
     }
+}
+
+/// The address of a Dubbo service: the interface, the method where one is
+/// named, then group and version.
+///
+/// Dubbo exports a service per **interface, group and version** — a method is
+/// not part of that identity, so the interface-level address is the one both
+/// halves always state and a method-level address is the extra a parser can
+/// add when it can see methods. An unstated group or version is written as
+/// nothing rather than left out, so the two halves spell it the same way and
+/// `a.b.C::` cannot drift from `a.b.C`.
+///
+/// Built, never passed through [`normalize`], which would cut at the `#` that
+/// names the method and prefix a `/` no RPC address has.
+pub fn dubbo(iface: &str, method: Option<&str>, group: &str, version: &str) -> String {
+    let method = method.map(|m| format!("#{m}")).unwrap_or_default();
+    format!("{iface}{method}:{group}:{version}")
 }
 
 /// Does this callee name a **mount** — a call that gives a router a prefix
@@ -156,6 +182,29 @@ impl RouteRef {
     }
 }
 
+/// One RPC endpoint a symbol states, as [`dubbo`] built it.
+///
+/// The same record serves both sides, as [`RouteRef`] does: a type that
+/// *provides* a service and one whose reference *asks for* it are read the
+/// same way and differ only in which property they are written to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RpcRef {
+    /// The symbol the endpoint belongs to: the provider, or the consumer
+    /// holding the reference.
+    pub symbol: String,
+    /// The address, from [`dubbo`].
+    pub written: String,
+    /// Where it is written, 1-based.
+    pub line: u64,
+}
+
+impl RpcRef {
+    /// The comparable form: the protocol token, a space, the address.
+    pub fn endpoint(&self) -> String {
+        format!("{} {}", Verb::Dubbo.as_str(), self.written)
+    }
+}
+
 /// Which half of a route a set of records states.
 ///
 /// A handler *serves* a path and a call *asks for* one. The records are read
@@ -171,25 +220,32 @@ pub enum Side {
 
 impl Side {
     /// The property holding the comparable form, and what it says.
-    fn comparable(self) -> (&'static str, &'static str) {
+    ///
+    /// Public because a plugin whose node builder takes properties one at a
+    /// time cannot hand [`Routes`] a map to write into — the XML reader is
+    /// one — and the name and wording still have to be the same ones `wire`
+    /// reads.
+    pub fn comparable(self) -> (&'static str, &'static str) {
         match self {
             Side::Serves => (
                 "serves",
                 "the routes this handler serves, as `VERB path` with every variable \
-                 segment reduced to `{}` — `*` where the declaration names no verb. \
-                 `wire` matches these against what asks for them",
+                 segment reduced to `{}` — `*` where the declaration names no verb; \
+                 an RPC service this type provides is `DUBBO interface#method:group:version`, \
+                 built rather than normalized. `wire` matches these against what asks for them",
             ),
             Side::Requests => (
                 "requests",
                 "the routes this function asks for, as `VERB path` with every variable \
-                 segment reduced to `{}` — `*` where the call names no verb. `wire` \
-                 matches these against what serves them",
+                 segment reduced to `{}` — `*` where the call names no verb; an RPC \
+                 service this type references is `DUBBO interface#method:group:version`, \
+                 built rather than normalized. `wire` matches these against what serves them",
             ),
         }
     }
 
     /// The property holding the source's own spelling, and what it says.
-    fn as_written(self) -> (&'static str, &'static str) {
+    pub fn as_written(self) -> (&'static str, &'static str) {
         let name = match self {
             Side::Serves => "serves_as_written",
             Side::Requests => "requests_as_written",
@@ -219,6 +275,9 @@ pub struct Routes<'a> {
     /// Patterns left out of the request side, counted so the account can say
     /// so rather than drop them in silence.
     patterns: usize,
+    /// Whether these are RPC endpoints, which the account names differently:
+    /// a service is provided by a type, not served by a handler.
+    rpc: bool,
 }
 
 impl<'a> Routes<'a> {
@@ -239,6 +298,28 @@ impl<'a> Routes<'a> {
             side,
             by_symbol,
             patterns,
+            rpc: false,
+        }
+    }
+
+    /// Fold a parse's RPC endpoints, the same side of the same convention.
+    ///
+    /// Separate from [`Routes::of`] only in how the comparable form is made:
+    /// an address is built, never normalized. What it writes, and where, is
+    /// the same code — so the two kinds of endpoint cannot drift apart in the
+    /// property that `wire` reads.
+    pub fn of_rpc(side: Side, refs: impl IntoIterator<Item = &'a RpcRef>) -> Self {
+        let mut by_symbol: BTreeMap<&str, Stated> = BTreeMap::new();
+        for r in refs {
+            let stated = by_symbol.entry(r.symbol.as_str()).or_default();
+            stated.comparable.insert(r.endpoint());
+            stated.written.insert(r.written.as_str());
+        }
+        Self {
+            side,
+            by_symbol,
+            patterns: 0,
+            rpc: true,
         }
     }
 
@@ -251,15 +332,9 @@ impl<'a> Routes<'a> {
             return 0;
         };
         let (name, desc) = self.side.comparable();
-        props.insert(
-            name.into(),
-            json!({ "$desc": desc, "$value": stated.comparable.iter().collect::<Vec<_>>() }),
-        );
+        merge(props, name, desc, stated.comparable.iter().map(String::as_str));
         let (name, desc) = self.side.as_written();
-        props.insert(
-            name.into(),
-            json!({ "$desc": desc, "$value": stated.written.iter().collect::<Vec<_>>() }),
-        );
+        merge(props, name, desc, stated.written.iter().copied());
         stated.comparable.len()
     }
 
@@ -272,12 +347,20 @@ impl<'a> Routes<'a> {
         if recorded == 0 && self.patterns == 0 {
             return None;
         }
-        let (property, what) = match self.side {
-            Side::Serves => ("serves", "declared by a handler"),
-            Side::Requests => ("requests", "asked for by a call whose argument is a path"),
+        let (property, what) = match (self.side, self.rpc) {
+            (Side::Serves, false) => ("serves", "declared by a handler"),
+            (Side::Requests, false) => {
+                ("requests", "asked for by a call whose argument is a path")
+            }
+            (Side::Serves, true) => ("serves", "provided by a type the wiring exports"),
+            (Side::Requests, true) => ("requests", "referenced by a type the wiring injects"),
+        };
+        let kind = match self.rpc {
+            true => "RPC service(s)",
+            false => "route(s)",
         };
         let mut note = format!(
-            "{recorded} route(s) {what} — recorded as `{property}`; the other half is \
+            "{recorded} {kind} {what} — recorded as `{property}`; the other half is \
              matched on demand, never stored"
         );
         if self.patterns > 0 {
@@ -288,6 +371,36 @@ impl<'a> Routes<'a> {
         }
         Some(note)
     }
+}
+
+/// Add to one of the four properties rather than replace it.
+///
+/// A type can state both kinds of endpoint — a `@RestController` that is also
+/// a Dubbo provider — and the two are folded separately, so the second writer
+/// must not drop what the first wrote. A set, because the same endpoint
+/// stated twice is one endpoint.
+fn merge<'s>(
+    props: &mut Map<String, Value>,
+    name: &str,
+    desc: &str,
+    values: impl Iterator<Item = &'s str>,
+) {
+    let mut all: BTreeSet<String> = props
+        .get(name)
+        .and_then(|v| v.get("$value"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    all.extend(values.map(str::to_string));
+    props.insert(
+        name.into(),
+        json!({ "$desc": desc, "$value": all.iter().collect::<Vec<_>>() }),
+    );
 }
 
 /// Could this string be a route? A leading `/`, or an absolute http(s) URL,

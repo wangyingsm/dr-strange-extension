@@ -275,3 +275,69 @@ fn a_pattern_is_not_a_request() {
         "an Ant-style declaration reduces its wildcard like any variable"
     );
 }
+
+/// An RPC address is built, not normalized: `normalize` would cut at the `#`
+/// that names the method and prefix a `/` no Dubbo address has.
+#[test]
+fn an_rpc_address_keeps_what_normalize_would_take() {
+    let addr = dubbo("com.acme.OrderService", Some("place"), "trade", "1.0.0");
+    assert_eq!(addr, "com.acme.OrderService#place:trade:1.0.0");
+    assert_eq!(
+        normalize(&addr),
+        "/com.acme.OrderService",
+        "which is exactly why an address never goes through it"
+    );
+}
+
+/// An unstated group or version is written as nothing, positionally, so the
+/// provider's address and the consumer's are the same string.
+#[test]
+fn an_unstated_group_and_version_are_spelled_the_same_on_both_sides() {
+    let provider = dubbo("com.acme.OrderService", None, "", "");
+    let consumer = dubbo("com.acme.OrderService", None, "", "");
+    assert_eq!(provider, "com.acme.OrderService::");
+    assert_eq!(provider, consumer);
+    assert_ne!(
+        provider,
+        dubbo("com.acme.OrderService", None, "trade", ""),
+        "a group is part of the identity, so it separates two services"
+    );
+}
+
+/// A protocol is stated by the plugin that read the wiring, never read out of
+/// a name — `@DubboService` must not look like a verb to the HTTP reader.
+#[test]
+fn a_dubbo_annotation_names_no_http_verb() {
+    for name in ["DubboService", "DubboReference", "Reference"] {
+        assert_eq!(Verb::from_name(name), None, "{name}");
+    }
+    assert_eq!(Verb::Dubbo.as_str(), "DUBBO");
+}
+
+/// Both halves of an RPC service are written to the same two properties the
+/// HTTP halves use, by the same writer.
+#[test]
+fn an_rpc_endpoint_is_written_where_wire_reads_routes() {
+    let refs = vec![RpcRef {
+        symbol: "com.acme.OrderServiceImpl".into(),
+        written: dubbo("com.acme.OrderService", None, "trade", "1.0.0"),
+        line: 12,
+    }];
+    let provided = Routes::of_rpc(Side::Serves, &refs);
+    let mut props = Map::new();
+    assert_eq!(provided.write("com.acme.OrderServiceImpl", &mut props), 1);
+    assert_eq!(
+        props["serves"]["$value"],
+        serde_json::json!(["DUBBO com.acme.OrderService:trade:1.0.0"]),
+        "the protocol token is the first word, so `wire --verb DUBBO` selects it"
+    );
+    assert_eq!(
+        props["serves_as_written"]["$value"],
+        serde_json::json!(["com.acme.OrderService:trade:1.0.0"])
+    );
+    let note = provided.note(1).unwrap();
+    assert!(
+        note.contains("1 RPC service(s) provided by a type"),
+        "the account names what these are: {note}"
+    );
+}
