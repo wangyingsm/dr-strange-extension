@@ -332,7 +332,12 @@ impl<'a> Routes<'a> {
             return 0;
         };
         let (name, desc) = self.side.comparable();
-        merge(props, name, desc, stated.comparable.iter().map(String::as_str));
+        merge(
+            props,
+            name,
+            desc,
+            stated.comparable.iter().map(String::as_str),
+        );
         let (name, desc) = self.side.as_written();
         merge(props, name, desc, stated.written.iter().copied());
         stated.comparable.len()
@@ -349,9 +354,7 @@ impl<'a> Routes<'a> {
         }
         let (property, what) = match (self.side, self.rpc) {
             (Side::Serves, false) => ("serves", "declared by a handler"),
-            (Side::Requests, false) => {
-                ("requests", "asked for by a call whose argument is a path")
-            }
+            (Side::Requests, false) => ("requests", "asked for by a call whose argument is a path"),
             (Side::Serves, true) => ("serves", "provided by a type the wiring exports"),
             (Side::Requests, true) => ("requests", "referenced by a type the wiring injects"),
         };

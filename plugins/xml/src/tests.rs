@@ -467,8 +467,7 @@ fn each_half_states_the_address_wire_matches() {
         .expect("the reference");
     let props: dr_strange_ext::Value = asked.properties.parse().unwrap();
     assert_eq!(
-        props["requests"]["$value"][0],
-        "DUBBO com.acme.OrderService:trade:1.0.0",
+        props["requests"]["$value"][0], "DUBBO com.acme.OrderService:trade:1.0.0",
         "the same string the provider states, or wire matches nothing"
     );
 }
@@ -484,7 +483,11 @@ fn a_bean_id_is_recorded_and_never_resolved() {
             "{BEANS}  <dubbo:service interface=\"com.acme.OrderService\" ref=\"orderServiceImpl\"/>\n</beans>\n"
         ),
     );
-    let exported = out.nodes.iter().find(|n| n.label == "DubboService").unwrap();
+    let exported = out
+        .nodes
+        .iter()
+        .find(|n| n.label == "DubboService")
+        .unwrap();
     let props: dr_strange_ext::Value = exported.properties.parse().unwrap();
     assert_eq!(props["ref"]["$value"], "orderServiceImpl");
     assert!(

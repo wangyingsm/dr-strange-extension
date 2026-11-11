@@ -286,7 +286,9 @@ pub fn anno_member(args: &str, key: &str) -> Option<String> {
             return None;
         }
         let v = value.trim();
-        v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).map(str::to_string)
+        v.strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .map(str::to_string)
     })
 }
 
