@@ -74,6 +74,7 @@ jobs:
             plugins/terraform
             plugins/xml
             plugins/sql
+            plugins/prometheus
       # Standalone crates, deliberately (each ships at its own pace), so the
       # gate loops rather than relying on a workspace.
       - name: Gates
@@ -84,7 +85,7 @@ jobs:
                      plugins/csharp/parser plugins/c/parser plugins/web/parser \
                      plugins/git/parser plugins/toml plugins/deps \
                      plugins/compose plugins/k8s plugins/terraform plugins/xml \
-                     plugins/sql; do
+                     plugins/sql plugins/prometheus; do
             echo "::group::$dir"
             (cd "$dir" && cargo fmt --check && cargo clippy --all-targets && cargo test)
             echo "::endgroup::"
@@ -136,6 +137,7 @@ jobs:
             plugins/terraform
             plugins/xml
             plugins/sql
+            plugins/prometheus
       - uses: actions/setup-go@v5
         with:
           go-version-file: plugins/go/parser/go.mod
@@ -159,7 +161,7 @@ jobs:
       - uses: extractions/setup-just@v3
       - name: Build every component
         run: |
-          for plugin in toml deps compose k8s terraform xml sql rust ts py c java kotlin csharp web go git; do
+          for plugin in toml deps compose k8s terraform xml sql prometheus rust ts py c java kotlin csharp web go git; do
             echo "::group::$plugin"
             just "${plugin}-plugin"
             echo "::endgroup::"
@@ -173,6 +175,7 @@ jobs:
                  plugins/terraform/target/wasm32-wasip2/release/drsg_plugin_terraform.wasm \
                  plugins/xml/target/wasm32-wasip2/release/drsg_plugin_xml.wasm \
                  plugins/sql/target/wasm32-wasip2/release/drsg_plugin_sql.wasm \
+                 plugins/prometheus/target/wasm32-wasip2/release/drsg_plugin_prometheus.wasm \
                  plugins/rust/component/target/wasm32-wasip2/release/drsg_plugin_rust.wasm \
                  plugins/ts/component/target/wasm32-wasip2/release/drsg_plugin_ts.wasm \
                  plugins/py/component/target/wasm32-wasip2/release/drsg_plugin_py.wasm \

@@ -132,6 +132,11 @@ sql-plugin:
 xml-plugin:
     cd plugins/xml && cargo build --release --target wasm32-wasip2
 
+# Prometheus: pure Rust like the two above, and it reads YAML the same way the
+# Compose reader does.
+prometheus-plugin:
+    cd plugins/prometheus && cargo build --release --target wasm32-wasip2
+
 # The manifest reader: pure Rust, no grammar and no C — what it reads is JSON,
 # TOML, XML and two line formats, and every reader for those is a crate.
 deps-plugin:
@@ -158,6 +163,7 @@ test:
     cd plugins/toml && cargo test
     cd plugins/deps && cargo test
     cd plugins/sql && cargo test
+    cd plugins/prometheus && cargo test
 
 # The P0 eval board: every known resolution gap as an ignored test, red
 # until its phase lands. Failing here is the expected state — this recipe
