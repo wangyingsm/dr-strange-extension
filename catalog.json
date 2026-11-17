@@ -154,6 +154,15 @@
       "sha256": "8dd8b23d09df9340f2e7a22352bfff70b1c526702d59a7a01bcf3b03ebcbd09f",
       "contract": "1.0.0",
       "min_drsg": "2.7.0"
+    },
+    {
+      "name": "prometheus",
+      "version": "1.0.0",
+      "claims": "Prometheus configuration",
+      "url": "https://github.com/wangyingsm/dr-strange-extension/releases/download/prometheus-v1.0.0/prometheus.wasm",
+      "sha256": "180f020106902c5bb7bffe3ea588007e010e01a5df84e8a039d5a5dd502b8b56",
+      "contract": "1.0.0",
+      "min_drsg": "2.31.0"
     }
   ]
 }
